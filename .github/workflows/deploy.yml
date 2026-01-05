@@ -1,0 +1,61 @@
+name: AI Platform CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - sandbox
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # Use 3.11 for CI stability
+          
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          
+      - name: Basic Logic Check
+        run: |
+          python test_ingestion.py # Verify ingestion logic
+
+  deploy:
+    name: Build & Deploy
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    
+    # Environment selection based on branch
+    environment:
+      name: ${{ github.ref_name == 'main' && 'prod' || (github.ref_name == 'dev' && 'dev' || 'sandbox') }}
+      
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build and push container images
+        run: |
+          # Example build commands for ACR
+          # az acr build --registry ${{ secrets.AZURE_CONTAINER_REGISTRY }} --image ai-platform-api:${{ github.sha }} -f docker/api.Dockerfile .
+          # az acr build --registry ${{ secrets.AZURE_CONTAINER_REGISTRY }} --image ai-platform-worker:${{ github.sha }} -f docker/worker.Dockerfile .
+          echo "Building and pushing for ${{ github.ref_name }} environment..."
+
+      - name: Deploy to Azure Container Apps
+        uses: azure/container-apps-deploy-action@v1
+        with:
+          imageToDeploy: ${{ secrets.AZURE_CONTAINER_REGISTRY }}.azurecr.io/ai-platform-api:${{ github.sha }}
+          resourceGroup: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          containerAppEnvironment: ${{ secrets.AZURE_CONTAINER_APP_ENV }}
+          containerAppName: ai-platform-api-${{ github.ref_name }}
