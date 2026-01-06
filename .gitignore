@@ -30,7 +30,7 @@ ENV/
 .env
 .env.local
 .env.sandbox    # For sandbox environment
-.env.dev        # For development environment
+.env.dev       # For development environment
 .env.prod       # For production environment
 .env.*.local
 

@@ -28,3 +28,4 @@ langchain-openai==0.0.8
 pinecone==8.0.0
 PyPDF2==3.0.1
 pydantic-settings==2.2.1
+cohere==5.0.0

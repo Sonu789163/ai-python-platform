@@ -43,11 +43,10 @@ celery_app.autodiscover_tasks(['app.workers'])
 def task_prerun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None, **extra):
     """Log task start."""
     logger.info(
-        "Task started",
+        event="Task started",
         task_id=task_id,
         task_name=task.name,
-        environment=settings.APP_ENV,
-        event="task_start"
+        environment=settings.APP_ENV
     )
 
 
@@ -55,10 +54,9 @@ def task_prerun_handler(sender=None, task_id=None, task=None, args=None, kwargs=
 def task_postrun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None, retval=None, **extra):
     """Log task completion."""
     logger.info(
-        "Task completed",
+        event="Task completed",
         task_id=task_id,
-        task_name=task.name,
-        event="task_complete"
+        task_name=task.name
     )
 
 
@@ -66,11 +64,10 @@ def task_postrun_handler(sender=None, task_id=None, task=None, args=None, kwargs
 def task_failure_handler(sender=None, task_id=None, exception=None, args=None, kwargs=None, traceback=None, einfo=None, **extra):
     """Log task failure."""
     logger.error(
-        "Task failed",
+        event="Task failed",
         task_id=task_id,
         task_name=sender.name,
         error=str(exception),
         error_type=type(exception).__name__,
-        event="task_error",
         exc_info=True
     )

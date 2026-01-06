@@ -1,21 +1,3 @@
-"""
-Document pipeline worker.
-Complete AI pipeline for document processing: extraction, chunking, embedding.
-"""
-import time
-from typing import Dict, Any
-from celery import Task
-
-from app.workers.celery_app import celery_app
-from app.services.extraction import extraction_service
-from app.services.chunking import chunking_service
-from app.services.embedding import embedding_service
-from app.db.mongo import mongodb
-from app.core.logging import get_logger, log_job_start, log_job_complete, log_job_error
-
-logger = get_logger(__name__)
-
-
 import asyncio
 import time
 import traceback
@@ -143,28 +125,15 @@ def process_document(
             }
         )
         
-        raise
-    
-    except Exception as e:
-        execution_time = time.time() - start_time
-        log_job_error(bound_logger, job_id, e, execution_time)
-        
         # Store error in MongoDB
-        if mongodb.sync_db:
-            collection = mongodb.get_sync_collection("processed_documents")
-            error_record = {
-                "job_id": job_id,
-                "file_url": file_url,
-                "file_type": file_type,
-                "status": "failed",
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "execution_time": execution_time,
-                "created_at": time.time()
-            }
-            collection.insert_one(error_record)
+        if not mongodb.sync_db:
+            mongodb.connect_sync()
+        collection = mongodb.get_sync_collection("document_processing")
+        collection.update_one(
+            {"job_id": job_id},
+            {"$set": {"status": "failed", "error": error_msg, "error_stack": error_stack}}
+        )
         
-        # Re-raise for Celery retry mechanism
         raise
 
 
@@ -208,50 +177,147 @@ def process_news_article(
         raise
 
 
-@celery_app.task(name="generate_summary")
+@celery_app.task(name="generate_summary", bind=True)
 def generate_summary(
-    text: str,
+    self,
+    namespace: str,
+    doc_type: str,
     job_id: str,
-    summary_type: str = "brief"
+    metadata: Dict[str, Any] = None
 ) -> Dict[str, Any]:
     """
-    Generate text summary.
-    
-    Args:
-        text: Input text to summarize
-        job_id: Unique job identifier
-        summary_type: Type of summary (brief, detailed, etc.)
-    
-    Returns:
-        Dict containing summary
+    Generate a full RHP/DRHP summary using the 2-stage agent pipeline.
     """
+    from app.services.summarization.pipeline import summary_pipeline
+    
     start_time = time.time()
     bound_logger = log_job_start(
         logger,
         job_id,
         "summary_generation",
-        summary_type=summary_type,
-        text_length=len(text)
+        namespace=namespace,
+        doc_type=doc_type
     )
     
     try:
-        # Placeholder implementation
-        bound_logger.info("Generating summary")
+        # Run the async pipeline in a sync context for Celery
+        result = asyncio.run(summary_pipeline.generate(namespace, doc_type))
         
-        summary = f"Summary of {len(text)} characters (placeholder)"
+        # Notify Backend of Success
+        backend_notifier.notify_status(
+            job_id=job_id,
+            status="completed",
+            namespace=namespace,
+            result=result
+        )
         
-        result = {
+        execution_time = time.time() - start_time
+        log_job_complete(bound_logger, job_id, execution_time)
+        
+        return {
             "job_id": job_id,
             "status": "success",
-            "summary": summary,
-            "summary_type": summary_type,
-            "execution_time": time.time() - start_time
+            "namespace": namespace,
+            "duration": execution_time,
+            "result": result
         }
-        
-        log_job_complete(bound_logger, job_id, result["execution_time"])
-        return result
     
     except Exception as e:
         execution_time = time.time() - start_time
         log_job_error(bound_logger, job_id, e, execution_time)
+        
+        # Notify Backend of Failure
+        backend_notifier.notify_status(
+            job_id=job_id,
+            status="failed",
+            namespace=namespace,
+            error={"message": str(e)}
+        )
+        raise
+@celery_app.task(name="generate_comparison", bind=True)
+def generate_comparison(
+    self,
+    drhp_namespace: str,
+    rhp_namespace: str,
+    job_id: str,
+    metadata: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    """
+    Generate a comparison report between DRHP and RHP.
+    """
+    from app.services.comparison.pipeline import comparison_pipeline
+    
+    start_time = time.time()
+    metadata = metadata or {}
+    authorization = metadata.get("authorization", "")
+    session_id = metadata.get("sessionId", "")
+    drhp_id = metadata.get("drhpDocumentId", "")
+    rhp_id = metadata.get("rhpDocumentId", "")
+    domain = metadata.get("domain", "")
+    domain_id = metadata.get("domainId", "")
+    
+    bound_logger = log_job_start(
+        logger,
+        job_id,
+        "comparison_generation",
+        drhp=drhp_namespace,
+        rhp=rhp_namespace
+    )
+    
+    try:
+        # 1. Run Pipeline
+        result = asyncio.run(comparison_pipeline.compare(
+            drhp_namespace=drhp_namespace,
+            rhp_namespace=rhp_namespace
+        ))
+        
+        if result["status"] == "success":
+            # 2. Create Report in Backend
+            backend_notifier.create_report(
+                drhp_namespace=drhp_namespace,
+                drhp_id=drhp_id,
+                title=f"Comparison: {drhp_namespace} vs {rhp_namespace}",
+                content=result["html"],
+                session_id=session_id,
+                rhp_namespace=rhp_namespace,
+                rhp_id=rhp_id,
+                domain=domain,
+                domain_id=domain_id,
+                authorization=authorization
+            )
+            
+            # 3. Update Status
+            backend_notifier.update_report_status(
+                job_id=job_id,
+                namespace=drhp_namespace,
+                status="success",
+                authorization=authorization
+            )
+        else:
+            raise Exception(result.get("message", "Comparison failed"))
+
+        execution_time = time.time() - start_time
+        log_job_complete(bound_logger, job_id, execution_time)
+        
+        return {
+            "job_id": job_id,
+            "status": "success",
+            "duration": execution_time,
+            "markdown": result.get("markdown"),
+            "html": result.get("html"),
+            "usage": result.get("usage")
+        }
+    
+    except Exception as e:
+        execution_time = time.time() - start_time
+        log_job_error(bound_logger, job_id, e, execution_time)
+        
+        # Notify Backend of Failure
+        backend_notifier.update_report_status(
+            job_id=job_id,
+            namespace=drhp_namespace,
+            status="failed",
+            error={"message": str(e), "stack": traceback.format_exc(), "timestamp": str(time.time())},
+            authorization=authorization
+        )
         raise

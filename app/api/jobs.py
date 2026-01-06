@@ -31,8 +31,22 @@ class NewsJobRequest(BaseModel):
 
 class SummaryJobRequest(BaseModel):
     """Summary generation job request."""
-    text: str = Field(..., description="Text to summarize")
-    summary_type: str = Field(default="brief", description="Type of summary")
+    namespace: str = Field(..., description="The filename/namespace in Pinecone to summarize")
+    doc_type: str = Field(default="drhp", description="Type of document (drhp or rhp)")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata")
+
+
+class ComparisonJobRequest(BaseModel):
+    """Comparison generation job request."""
+    drhpNamespace: str
+    rhpNamespace: str
+    drhpDocumentId: str
+    rhpDocumentId: str
+    sessionId: str
+    domain: Optional[str] = None
+    domainId: Optional[str] = None
+    authorization: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata")
 
 
 class JobResponse(BaseModel):
@@ -128,12 +142,6 @@ async def submit_news_job(request: NewsJobRequest) -> JobResponse:
 async def submit_summary_job(request: SummaryJobRequest) -> JobResponse:
     """
     Submit summary generation job.
-    
-    Args:
-        request: Summary job request
-    
-    Returns:
-        JobResponse with job_id
     """
     try:
         job_id = str(uuid.uuid4())
@@ -141,13 +149,13 @@ async def submit_summary_job(request: SummaryJobRequest) -> JobResponse:
         logger.info(
             "Summary job submitted",
             job_id=job_id,
-            text_length=len(request.text),
-            summary_type=request.summary_type
+            namespace=request.namespace,
+            doc_type=request.doc_type
         )
         
         celery_app.send_task(
             "generate_summary",
-            args=[request.text, job_id, request.summary_type],
+            args=[request.namespace, request.doc_type, job_id, request.metadata],
             task_id=job_id
         )
         
@@ -159,6 +167,52 @@ async def submit_summary_job(request: SummaryJobRequest) -> JobResponse:
     
     except Exception as e:
         logger.error("Failed to submit summary job", error=str(e), exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to enqueue job: {str(e)}"
+        )
+
+
+@router.post("/comparison", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
+async def submit_comparison_job(request: ComparisonJobRequest) -> JobResponse:
+    """
+    Submit DRHP vs RHP comparison job.
+    """
+    try:
+        job_id = str(uuid.uuid4())
+        
+        # Prepare metadata for worker
+        worker_metadata = request.metadata or {}
+        worker_metadata.update({
+            "authorization": request.authorization,
+            "sessionId": request.sessionId,
+            "drhpDocumentId": request.drhpDocumentId,
+            "rhpDocumentId": request.rhpDocumentId,
+            "domain": request.domain,
+            "domainId": request.domainId
+        })
+        
+        logger.info(
+            "Comparison job submitted",
+            job_id=job_id,
+            drhp=request.drhpNamespace,
+            rhp=request.rhpNamespace
+        )
+        
+        celery_app.send_task(
+            "generate_comparison",
+            args=[request.drhpNamespace, request.rhpNamespace, job_id, worker_metadata],
+            task_id=job_id
+        )
+        
+        return JobResponse(
+            job_id=job_id,
+            status="accepted",
+            message="Comparison generation job enqueued successfully"
+        )
+    
+    except Exception as e:
+        logger.error("Failed to submit comparison job", error=str(e), exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to enqueue job: {str(e)}"
