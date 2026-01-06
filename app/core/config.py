@@ -3,7 +3,7 @@ Environment-based configuration management.
 Supports sandbox, dev, and prod environments.
 """
 import os
-from typing import Literal
+from typing import Literal, Optional
 from functools import lru_cache
 from pydantic_settings import BaseSettings
 
@@ -53,17 +53,23 @@ class Settings(BaseSettings):
     
     # OpenAI
     OPENAI_API_KEY: str = ""
+    SUMMARY_MODEL: str = "gpt-4.1-mini"
     
     # Pinecone
     PINECONE_API_KEY: str = ""
     PINECONE_ENVIRONMENT: str = ""
-    PINECONE_DRHP_INDEX: str = "drhpdocuments"
+    PINECONE_DRHP_INDEX: str = "drhpdocuments"  # Fixed name
     PINECONE_RHP_INDEX: str = "rhpdocuments"
-    PINECONE_DRHP_HOST: str = ""
-    PINECONE_RHP_HOST: str = ""
+    PINECONE_DRHP_HOST: str = "https://drhpdocuments-w5m6qxe.svc.aped-4627-b74a.pinecone.io"
+    PINECONE_RHP_HOST: str = "https://rhpdocuments-w5m6qxe.svc.aped-4627-b74a.pinecone.io"
+    PERPLEXITY_API_KEY: Optional[str] = None
+    COHERE_API_KEY: Optional[str] = None
     
-    # Backend
+    # Backend URLs
     BACKEND_STATUS_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/documents/upload-status/update"
+    REPORT_CREATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/reports/create-report"
+    REPORT_STATUS_UPDATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/reports/report-status/update"
+    CHAT_STATUS_UPDATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/chats/chat-status/update"
 
     class Config:
         env_file = ".env"

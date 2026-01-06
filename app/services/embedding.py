@@ -57,6 +57,16 @@ class EmbeddingService:
         logger.info("Chunks embedded", chunk_count=len(chunks))
         return chunks
 
+    async def embed_text(self, text: str) -> List[float]:
+        """
+        Generate embedding for a single text.
+        """
+        try:
+            return self.embeddings.embed_query(text)
+        except Exception as e:
+            logger.error("Text embedding failed", error=str(e))
+            raise
+
 
 # Global service instance
 embedding_service = EmbeddingService()

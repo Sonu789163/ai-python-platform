@@ -90,10 +90,9 @@ def log_job_start(
         job_id=job_id,
         pipeline=pipeline,
         environment=settings.APP_ENV,
-        event="job_start",
         **kwargs
     )
-    bound_logger.info("Job started", job_id=job_id, pipeline=pipeline)
+    bound_logger.info(event="Job started", job_id_arg=job_id, pipeline_arg=pipeline)
     return bound_logger
 
 
@@ -115,11 +114,10 @@ def log_job_complete(
         **kwargs: Additional context
     """
     logger.info(
-        "Job completed",
+        event="Job completed",
         job_id=job_id,
         execution_time=execution_time,
         status=status,
-        event="job_complete",
         **kwargs
     )
 
@@ -142,12 +140,11 @@ def log_job_error(
         **kwargs: Additional context
     """
     logger.error(
-        "Job failed",
+        event="Job failed",
         job_id=job_id,
         error=str(error),
         error_type=type(error).__name__,
         execution_time=execution_time,
-        event="job_error",
         exc_info=True,
         **kwargs
     )
