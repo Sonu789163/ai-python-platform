@@ -199,16 +199,34 @@ def generate_summary(
         doc_type=doc_type
     )
     
+    metadata = metadata or {}
+    authorization = metadata.get("authorization", "")
+    document_id = metadata.get("documentId", "")
+    domain = metadata.get("domain", "")
+    domain_id = metadata.get("domainId", "")
+    workspace_id = metadata.get("workspaceId", "")
+    
     try:
         # Run the async pipeline in a sync context for Celery
         result = asyncio.run(summary_pipeline.generate(namespace, doc_type))
         
-        # Notify Backend of Success
-        backend_notifier.notify_status(
+        # 1. Create Summary Record in Backend
+        backend_notifier.create_summary(
+            title=f"{doc_type.upper()} Summary: {namespace}",
+            content=result.get("html", result.get("content", "")),
+            document_id=document_id,
+            domain=domain,
+            domain_id=domain_id,
+            authorization=authorization,
+            workspace_id=workspace_id
+        )
+
+        # 2. Notify Backend of Success (Real-time update)
+        backend_notifier.update_summary_status(
             job_id=job_id,
             status="completed",
-            namespace=namespace,
-            result=result
+            authorization=authorization,
+            workspace_id=workspace_id
         )
         
         execution_time = time.time() - start_time
@@ -227,11 +245,12 @@ def generate_summary(
         log_job_error(bound_logger, job_id, e, execution_time)
         
         # Notify Backend of Failure
-        backend_notifier.notify_status(
+        backend_notifier.update_summary_status(
             job_id=job_id,
             status="failed",
-            namespace=namespace,
-            error={"message": str(e)}
+            error={"message": str(e)},
+            authorization=authorization,
+            workspace_id=workspace_id
         )
         raise
 @celery_app.task(name="generate_comparison", bind=True)
@@ -255,6 +274,7 @@ def generate_comparison(
     rhp_id = metadata.get("rhpDocumentId", "")
     domain = metadata.get("domain", "")
     domain_id = metadata.get("domainId", "")
+    workspace_id = metadata.get("workspaceId", "")
     
     bound_logger = log_job_start(
         logger,
@@ -283,7 +303,8 @@ def generate_comparison(
                 rhp_id=rhp_id,
                 domain=domain,
                 domain_id=domain_id,
-                authorization=authorization
+                authorization=authorization,
+                workspace_id=workspace_id
             )
             
             # 3. Update Status
@@ -291,7 +312,8 @@ def generate_comparison(
                 job_id=job_id,
                 namespace=drhp_namespace,
                 status="success",
-                authorization=authorization
+                authorization=authorization,
+                workspace_id=workspace_id
             )
         else:
             raise Exception(result.get("message", "Comparison failed"))
@@ -318,6 +340,7 @@ def generate_comparison(
             namespace=drhp_namespace,
             status="failed",
             error={"message": str(e), "stack": traceback.format_exc(), "timestamp": str(time.time())},
-            authorization=authorization
+            authorization=authorization,
+            workspace_id=workspace_id
         )
         raise

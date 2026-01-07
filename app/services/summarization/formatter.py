@@ -38,7 +38,9 @@ class HTMLFormatter:
         if not insert_html or not isinstance(insert_html, str) or not insert_html.strip():
             return full_html
             
-        pattern = rf'(<h2[^>]*>[^<]*{re.escape(section_header)}[^<]*</h2>)'
+        # Look for H2 tags that contain the section_header string (case-insensitive)
+        # We use a pattern that matches any characters around the header text within the H2 block
+        pattern = rf'(<h2[^>]*>[^<]*?{re.escape(section_header)}[^<]*?</h2>)'
         match = re.search(pattern, full_html, re.IGNORECASE)
         
         if match:

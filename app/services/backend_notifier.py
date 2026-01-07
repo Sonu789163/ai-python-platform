@@ -21,7 +21,8 @@ class BackendNotifier:
         namespace: str,
         error: Optional[Dict[str, Any]] = None,
         execution_id: Optional[str] = None,
-        result: Optional[Dict[str, Any]] = None
+        result: Optional[Dict[str, Any]] = None,
+        workspace_id: str = ""
     ) -> bool:
         """
         Send status update to backend.
@@ -47,12 +48,16 @@ class BackendNotifier:
                 "timestamp": str(time.time())
             }
             
+        headers = {"Content-Type": "application/json"}
+        if workspace_id:
+            headers["x-workspace"] = workspace_id
+            
         try:
             logger.info("Notifying backend of status", job_id=job_id, status=status)
             response = requests.post(
                 settings.BACKEND_STATUS_URL,
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 timeout=10
             )
             response.raise_for_status()
@@ -69,11 +74,9 @@ class BackendNotifier:
         title: str,
         content: str,
         session_id: str,
-        rhp_namespace: str = "",
-        rhp_id: str = "",
-        domain: str = "",
         domain_id: str = "",
-        authorization: str = ""
+        authorization: str = "",
+        workspace_id: str = ""
     ) -> bool:
         """
         Creates a report record in the backend.
@@ -94,6 +97,8 @@ class BackendNotifier:
         headers = {"Content-Type": "application/json"}
         if authorization:
             headers["Authorization"] = authorization
+        if workspace_id:
+            headers["x-workspace"] = workspace_id
             
         try:
             logger.info("Creating report in backend", title=title, session_id=session_id)
@@ -116,7 +121,8 @@ class BackendNotifier:
         namespace: str,
         status: str,
         error: Optional[Dict[str, Any]] = None,
-        authorization: str = ""
+        authorization: str = "",
+        workspace_id: str = ""
     ) -> bool:
         """
         Updates the final status of a report generation job.
@@ -140,6 +146,8 @@ class BackendNotifier:
         headers = {"Content-Type": "application/json"}
         if authorization:
             headers["Authorization"] = authorization
+        if workspace_id:
+            headers["x-workspace"] = workspace_id
             
         try:
             logger.info("Updating report status", job_id=job_id, status=status)
@@ -161,7 +169,8 @@ class BackendNotifier:
         namespace: str,
         status: str,
         error: Optional[Dict[str, Any]] = None,
-        authorization: str = ""
+        authorization: str = "",
+        workspace_id: str = ""
     ) -> bool:
         """
         Updates the final status of a chat request.
@@ -185,6 +194,8 @@ class BackendNotifier:
         headers = {"Content-Type": "application/json"}
         if authorization:
             headers["Authorization"] = authorization
+        if workspace_id:
+            headers["x-workspace"] = workspace_id
             
         try:
             logger.info("Updating chat status", job_id=job_id, status=status)
@@ -199,6 +210,88 @@ class BackendNotifier:
             return True
         except Exception as e:
             logger.error("Failed to update chat status", error=str(e), job_id=job_id)
+            return False
+
+    @staticmethod
+    def create_summary(
+        title: str,
+        content: str,
+        document_id: str,
+        domain: str = "",
+        domain_id: str = "",
+        authorization: str = "",
+        workspace_id: str = ""
+    ) -> bool:
+        """
+        Creates a summary record in the backend.
+        Replicates n8n 'sent response to the backend api for create summary' node.
+        """
+        payload = {
+            "title": title,
+            "content": content,
+            "documentId": document_id,
+            "domain": domain,
+            "domainId": domain_id
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        if authorization:
+            headers["Authorization"] = authorization
+        if workspace_id:
+            headers["x-workspace"] = workspace_id
+            
+        try:
+            logger.info("Creating summary in backend", title=title, document_id=document_id)
+            response = requests.post(
+                settings.SUMMARY_CREATE_URL,
+                json=payload,
+                headers=headers,
+                timeout=20
+            )
+            response.raise_for_status()
+            logger.info("Summary created successfully", status_code=response.status_code)
+            return True
+        except Exception as e:
+            logger.error("Failed to create summary", error=str(e), document_id=document_id)
+            return False
+
+    @staticmethod
+    def update_summary_status(
+        job_id: str,
+        status: str,
+        error: Optional[Dict[str, Any]] = None,
+        authorization: str = "",
+        workspace_id: str = ""
+    ) -> bool:
+        """
+        Updates the real-time status of a summary job.
+        Replicates n8n 'summary status update' node.
+        """
+        payload = {
+            "jobId": job_id,
+            "status": status,
+            "error": error
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        if authorization:
+            headers["Authorization"] = authorization
+        if workspace_id:
+            headers["x-workspace"] = workspace_id
+            
+        try:
+            logger.info("Updating summary status", job_id=job_id, status=status)
+            response = requests.post(
+                settings.SUMMARY_STATUS_UPDATE_URL,
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            logger.info("Summary status updated successfully", status_code=response.status_code)
+            return True
+        except Exception as e:
+            logger.error("Failed to update summary status", error=str(e), job_id=job_id)
             return False
 
 

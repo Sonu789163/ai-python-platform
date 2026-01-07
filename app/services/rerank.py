@@ -30,7 +30,7 @@ class RerankService:
                 query=query,
                 documents=documents,
                 top_n=top_n,
-                model="rerank-english-v3.0"  # Latest recommended model
+                model="rerank-v4.0-fast"  # Latest recommended model
             )
             
             reranked_docs = []

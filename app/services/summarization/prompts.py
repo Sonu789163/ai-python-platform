@@ -302,7 +302,7 @@ Generate a **comprehensive, professionally formatted DRHP summary** that:
 - The tables and the fromat given in prompt are an example.  actual tables will be formatted according to the extracted data from the DRHP chunks.
 - Never febricate and assume data always keep factual data accuracy should be 100% 
 - Maintains 100% numerical accuracy with precise figures and percentages
-- Achieves **MINIMUM 10,000 to 15000 tokens** in length
+- Achieves **TARGET 7,000 to 12,000 tokens** in length to ensure all 12 sections are covered
 - Follows formal, investor-friendly language suitable for fund managers
 
 ## Critical Operating Principles
@@ -1139,7 +1139,8 @@ Extract all tables mentioned in the DRHP under **“Summary of Related Party Tra
 8. **DOCUMENT VERIFICATION** - maintain traceability to source chunks
 9. **PROFESSIONAL QUALITY** - investor-ready formatting and language
 10. **NO SHORTCUTS** - thorough verification is required, not speed
-
+11. **STRICT OUTPUT ONLY** - Your ONLY output must be the full 12-section Markdown summary. Do NOT include any intro text, "Verification Summary", "Final Recommendations", or "Auditor Notes". If it is not one of the 12 sections, DO NOT output it.
+12. **RECONSTRUCT EVERYTHING** - Do not just output what changed. You must output the entire document from Section I to Section XII every time.
 ---
 
 ## 📌 ACCURACY VERIFICATION CHECKLIST

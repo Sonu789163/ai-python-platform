@@ -65,11 +65,13 @@ class Settings(BaseSettings):
     PERPLEXITY_API_KEY: Optional[str] = None
     COHERE_API_KEY: Optional[str] = None
     
-    # Backend URLs
-    BACKEND_STATUS_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/documents/upload-status/update"
-    REPORT_CREATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/reports/create-report"
-    REPORT_STATUS_UPDATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/reports/report-status/update"
-    CHAT_STATUS_UPDATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/chats/chat-status/update"
+    # Backend URLs (Default to localhost for development)
+    BACKEND_STATUS_URL: str = "http://localhost:5000/api/documents/upload-status/update"
+    REPORT_CREATE_URL: str = "http://localhost:5000/api/reports/create-report"
+    REPORT_STATUS_UPDATE_URL: str = "http://localhost:5000/api/reports/report-status/update"
+    SUMMARY_CREATE_URL: str = "http://localhost:5000/api/summaries/create"
+    SUMMARY_STATUS_UPDATE_URL: str = "http://localhost:5000/api/summaries/summary-status/update"
+    CHAT_STATUS_UPDATE_URL: str = "http://localhost:5000/api/chats/chat-status/update"
 
     class Config:
         env_file = ".env"

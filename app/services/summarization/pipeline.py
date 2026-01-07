@@ -22,59 +22,63 @@ class SummaryPipeline:
         self.embedding = EmbeddingService()
         self.client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
-    async def _retrieve_context(self, queries: List[str], namespace: str, index_name: str, host: str, vector_top_k: int = 100, rerank_top_n: int = 25) -> str:
-        """
-        Runs sub-queries to retrieve context from Pinecone and reranks using Cohere.
-        Matches n8n logic (vector topK: 50, rerank topN: 15).
-        """
+    async def _retrieve_query_context(self, query: str, namespace: str, index_name: str, host: str, vector_top_k: int, rerank_top_n: int) -> List[str]:
+        """Helper to retrieve context for a single query."""
         from app.services.rerank import rerank_service
         
-        all_context = []
-        for query in queries:
-            # 1. Vector Search
-            query_vector = await self.embedding.embed_text(query)
-            index = vector_store_service.get_index(index_name, host=host)
-            # Prepare query filter
-            query_filter = {"documentName": namespace} if namespace and namespace != "__default__" else None
+        # 1. Vector Search
+        query_vector = await self.embedding.embed_text(query)
+        index = vector_store_service.get_index(index_name, host=host)
+        query_filter = {"documentName": namespace} if namespace and namespace != "__default__" else None
 
+        search_res = index.query(
+            vector=query_vector,
+            top_k=vector_top_k,
+            namespace=namespace,
+            include_metadata=True,
+            filter=query_filter
+        )
+        initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
+        
+        # Fallback to __default__
+        if not initial_chunks and namespace and namespace != "__default__":
             search_res = index.query(
                 vector=query_vector,
                 top_k=vector_top_k,
-                namespace=namespace,
+                namespace="__default__",
                 include_metadata=True,
                 filter=query_filter
             )
             initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
-            logger.info("Namespace search completed", query=query[:50], matches=len(initial_chunks), namespace=namespace)
             
-            # Fallback to __default__ if specified namespace is empty
-            if not initial_chunks and namespace and namespace != "__default__":
+            if not initial_chunks:
                 search_res = index.query(
                     vector=query_vector,
                     top_k=vector_top_k,
                     namespace="__default__",
-                    include_metadata=True,
-                    filter=query_filter
+                    include_metadata=True
                 )
                 initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
-                if initial_chunks:
-                    logger.info("Retrieved chunks from __default__ with metadata filter", query=query[:50], count=len(initial_chunks))
-                else:
-                    # Final fallback: query __default__ WITHOUT filter (could be noisy)
-                    search_res = index.query(
-                        vector=query_vector,
-                        top_k=vector_top_k,
-                        namespace="__default__",
-                        include_metadata=True
-                    )
-                    initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
-                    if initial_chunks:
-                         logger.warning("Falling back to UNFILTERED __default__ search", query=query[:50])
-            
-            # 2. Rerank
-            if initial_chunks:
-                reranked_chunks = rerank_service.rerank(query, initial_chunks, top_n=rerank_top_n)
-                all_context.extend(reranked_chunks)
+
+        if not initial_chunks:
+            return []
+
+        # 2. Rerank
+        return rerank_service.rerank(query, initial_chunks, top_n=rerank_top_n)
+
+    async def _retrieve_context(self, queries: List[str], namespace: str, index_name: str, host: str, vector_top_k: int = 50, rerank_top_n: int = 15) -> str:
+        """
+        Runs sub-queries in parallel to retrieve context from Pinecone and rerank.
+        """
+        tasks = [
+            self._retrieve_query_context(q, namespace, index_name, host, vector_top_k, rerank_top_n)
+            for q in queries
+        ]
+        results = await asyncio.gather(*tasks)
+        
+        all_context = []
+        for res in results:
+            all_context.extend(res)
             
         # Preserve order while removing duplicates
         seen = set()
@@ -112,7 +116,7 @@ class SummaryPipeline:
             logger.info("Stage 1: Running Investor Extractor Agent")
             investor_context = await self._retrieve_context(
                 ["Extract all equity share capital history and list of investors"],
-                namespace, index_name, host, vector_top_k=20
+                namespace, index_name, host, vector_top_k=30
             )
             logger.info("Investor context retrieved", length=len(investor_context))
             
@@ -124,7 +128,7 @@ class SummaryPipeline:
                     {"role": "user", "content": f"Extract data for {namespace} from: {investor_context}"}
                 ],
                 response_format={"type": "json_object"},
-                max_tokens=4000
+                max_tokens=16000 # Increased to avoid truncation
             )
             
             # Log usage
@@ -137,52 +141,60 @@ class SummaryPipeline:
             logger.info("Stage 1 LLM completed", **usage_stats["stage1"])
             
             import json
-            investor_data = json.loads(investor_resp.choices[0].message.content)
+            content = investor_resp.choices[0].message.content
+            try:
+                investor_data = json.loads(content)
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse Stage 1 JSON", error=str(e), content_preview=content[:1500])
+                # Attempt basic cleanup if it was just a trailing comma or similar
+                # For now, we raise a clearer error
+                raise Exception(f"AI response was not valid JSON: {str(e)}")
             
             # Start research in parallel while parsing investor data
             research_task = asyncio.create_task(research_service.get_adverse_findings(namespace, "Promoters from DRHP"))
             
-            # Handle list or object response
+            # 1. Parse Investor Data (Agent 1 Output)
+            investor_html_snippet = ""
+            investor_md = ""
+            
+            # Robust extraction of list
+            results = []
             if isinstance(investor_data, list):
                 results = investor_data
             elif isinstance(investor_data, dict):
                 results = investor_data.get("results", []) or [investor_data]
-            else:
-                results = []
             
-            logger.info("Stage 1 data parsed", result_count=len(results))
-            
-            investor_html_snippet = ""
             if results:
                 # Find by type 'summary_report' or just the first content
-                report_obj = next((item for item in results if isinstance(item, dict) and item.get("type") == "summary_report"), None)
-                if report_obj:
-                    investor_html_snippet = formatter.markdown_to_html(report_obj.get("content", ""))
-                elif len(results) > 0 and isinstance(results[0], dict):
-                    investor_html_snippet = formatter.markdown_to_html(results[0].get("content", ""))
+                report_obj = next((item for item in results if isinstance(item, dict) and item.get("type") == "summary_report"), results[0])
                 
-                calc_obj = next((item for item in results if isinstance(item, dict) and item.get("type") == "calculation_data"), None)
+                if isinstance(report_obj, dict):
+                    raw_content = report_obj.get("content", "")
+                    if raw_content:
+                        investor_html_snippet = formatter.markdown_to_html(raw_content)
+                        investor_md = raw_content
+                
+                # Check for calculations
+                calc_obj = next((item for item in results if isinstance(item, dict) and (item.get("type") == "calculation_data" or "calculation_parameters" in item)), None)
                 if calc_obj:
-                    calc_data = calc_obj.get("calculation_parameters", {})
+                    calc_data = calc_obj.get("calculation_parameters", {}) or calc_obj
                     premium_params = calc_data.get("premium_rounds", [])
                     if premium_params:
                         calc_rounds = valuation_service.calculate_premium_rounds(premium_params)
                         valuation_html = valuation_service.generate_valuation_html(calc_rounds)
                         investor_html_snippet += f"\n\n{valuation_html}"
+                        investor_md += f"\n\n{valuation_html}"
             
-            # Keep markdown version for prompt injection
-            investor_md = ""
-            if report_obj:
-                 investor_md = report_obj.get("content", "")
-                 if calc_obj:
-                      investor_md += f"\n\n{valuation_service.generate_valuation_html(calc_rounds)}" # valuation is html-ish but markdown handles it
+            logger.info("Stage 1 data processed", 
+                        has_html=bool(investor_html_snippet), 
+                        has_md=bool(investor_md))
 
             if not investor_html_snippet:
                 logger.warning("No investor content extracted in Stage 1")
 
             # STAGE 2: Main Generator with Sub-queries
             logger.info("Stage 2: Running Main Summary Generator")
-            main_context = await self._retrieve_context(SUBQUERIES, namespace, index_name, host)
+            main_context = await self._retrieve_context(SUBQUERIES, namespace, index_name, host, rerank_top_n=15)
             
             # Prepare Stage 1 integration prompt
             stage1_integration = ""
@@ -193,11 +205,11 @@ class SummaryPipeline:
                 model=settings.SUMMARY_MODEL,
                 messages=[
                     {"role": "system", "content": GENERATOR_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Target Document: {namespace}\n\n{stage1_integration}\n\nContext: {main_context[:300000]}"}
+                    {"role": "user", "content": f"Target Document: {namespace}\n\n{stage1_integration}\n\nContext: {main_context[:400000]}"}
                 ],
                 max_tokens=16384
             )
-            logger.info("Main Generator context sent", length=len(main_context[:300000]))
+            logger.info("Main Generator context sent", length=len(main_context[:400000]))
             
             usage = main_gen_resp.usage
             usage_stats["stage2"] = {
@@ -215,11 +227,11 @@ class SummaryPipeline:
                 model=settings.SUMMARY_MODEL,
                 messages=[
                     {"role": "system", "content": VALIDATOR_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Target Document: {namespace}\n\nValidate this DRAFT: {draft_summary}\n\nAgainst CONTEXT: {main_context[:300000]}"}
+                    {"role": "user", "content": f"Target Document: {namespace}\n\nValidate this DRAFT: {draft_summary}\n\nAgainst CONTEXT: {main_context[:400000]}"}
                 ],
                 max_tokens=16384
             )
-            logger.info("Validator context sent", length=len(main_context[:300000]))
+            logger.info("Validator context sent", length=len(main_context[:400000]))
             
             usage = final_resp.usage
             usage_stats["stage3"] = {
@@ -231,9 +243,14 @@ class SummaryPipeline:
             
             final_md = final_resp.choices[0].message.content
 
-            # Wait for research to finish
-            research_data = await research_task
-            research_html_snippet = formatter.format_research_report(research_data)
+            # Wait for research to finish (max 2 minutes)
+            try:
+                research_data = await asyncio.wait_for(research_task, timeout=120)
+                research_html_snippet = formatter.format_research_report(research_data)
+            except Exception as e:
+                logger.warning(f"Research task failed or timed out: {e}")
+                research_data = []
+                research_html_snippet = ""
 
             # 6. Final Formatting and Injection
             # Replicate n8n merge logic
@@ -242,7 +259,7 @@ class SummaryPipeline:
             full_raw_report = f"<h1>DRHP Summary Report: {namespace}</h1>\n\n" + final_md
             html_content = formatter.markdown_to_html(full_raw_report)
             
-            # Step 2: Insert Investor Data before SECTION VII
+            # Step 2: Insert Investor Data before SECTION VII (Capital Structure follow-up)
             if investor_html_snippet:
                 html_content = formatter.insert_html_before_section(
                     html_content,
