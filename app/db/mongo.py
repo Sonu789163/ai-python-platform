@@ -76,7 +76,7 @@ class MongoDB:
         Returns:
             AsyncIOMotorCollection instance
         """
-        if not self.db:
+        if self.db is None:
             raise RuntimeError("MongoDB not connected. Call connect() first.")
         return self.db[collection_name]
     
@@ -90,7 +90,7 @@ class MongoDB:
         Returns:
             Collection instance
         """
-        if not self.sync_db:
+        if self.sync_db is None:
             raise RuntimeError("MongoDB sync not connected. Call connect_sync() first.")
         return self.sync_db[collection_name]
 
@@ -106,6 +106,6 @@ async def get_database() -> AsyncIOMotorDatabase:
     Returns:
         AsyncIOMotorDatabase instance
     """
-    if not mongodb.db:
+    if mongodb.db is None:
         await mongodb.connect()
     return mongodb.db

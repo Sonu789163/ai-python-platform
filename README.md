@@ -139,7 +139,7 @@ ai-python-platform/
 
 **Terminal 1 - Start API**
 ```bash
-python -m app.main
+python3 -m app.main
 # API available at http://localhost:8000
 ```
 

@@ -86,9 +86,12 @@ class VectorStoreService:
         )
         
         # Pinecone upsert in batches
+        # Ensure namespace is not "__default__" which is forbidden in newer API versions
+        safe_namespace = "" if namespace == "__default__" or not namespace else namespace
+        
         upsert_response = index.upsert(
             vectors=vectors,
-            namespace=namespace
+            namespace=safe_namespace
         )
         
         # In newer SDK, upsert_response is an object with .upserted_count

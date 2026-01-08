@@ -42,37 +42,37 @@ class ComparisonPipeline:
                 index = vector_store_service.get_index(index_name, host=host)
                 
                 # Filter by documentName metadata
-                query_filter = {"documentName": namespace} if namespace and namespace != "__default__" else None
+                query_filter = {"documentName": namespace} if namespace and namespace != "" else None
 
                 # First try: Query the specified namespace with filter
                 search_res = index.query(
                     vector=query_vector,
                     top_k=vector_top_k,
-                    namespace=namespace,
+                    namespace=namespace or "",
                     include_metadata=True,
                     filter=query_filter
                 )
                 initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
                 
-                # Fallback 1: Try __default__ namespace WITH metadata filter
-                if not initial_chunks and namespace and namespace != "__default__":
-                    logger.info(f"Retrying search in __default__ namespace for {namespace}")
+                # Fallback 1: Try "" namespace WITH metadata filter
+                if not initial_chunks and namespace and namespace != "":
+                    logger.info(f"Retrying search in \"\" namespace for {namespace}")
                     search_res = index.query(
                         vector=query_vector,
                         top_k=vector_top_k,
-                        namespace="__default__",
+                        namespace="",
                         include_metadata=True,
                         filter=query_filter
                     )
                     initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
 
-                # Fallback 2: Try __default__ namespace WITHOUT filter (last resort)
-                if not initial_chunks and namespace and namespace != "__default__":
-                    logger.warning(f"Final fallback: UNFILTERED __default__ search for {namespace}")
+                # Fallback 2: Try "" namespace WITHOUT filter (last resort)
+                if not initial_chunks and namespace and namespace != "":
+                    logger.warning(f"Final fallback: UNFILTERED \"\" search for {namespace}")
                     search_res = index.query(
                         vector=query_vector,
                         top_k=vector_top_k,
-                        namespace="__default__",
+                        namespace="",
                         include_metadata=True
                     )
                     initial_chunks = [m['metadata']['text'] for m in search_res['matches']]

@@ -203,12 +203,23 @@ def generate_summary(
         # Run the async pipeline in a sync context for Celery
         result = asyncio.run(summary_pipeline.generate(namespace, doc_type))
         
-        # Notify Backend of Success
-        backend_notifier.notify_status(
+        # Notify Backend of Success - First create the record
+        if result.get("status") == "success":
+            backend_notifier.create_summary(
+                title=f"Summary: {namespace}",
+                content=result.get("html", ""),
+                document_id=metadata.get("documentId", ""),
+                domain=metadata.get("domain", ""),
+                domain_id=metadata.get("domainId", ""),
+                authorization=metadata.get("authorization", "")
+            )
+        
+        # Then update the status to trigger UI refresh
+        backend_notifier.update_summary_status(
             job_id=job_id,
             status="completed",
             namespace=namespace,
-            result=result
+            authorization=metadata.get("authorization", "")
         )
         
         execution_time = time.time() - start_time
@@ -227,11 +238,12 @@ def generate_summary(
         log_job_error(bound_logger, job_id, e, execution_time)
         
         # Notify Backend of Failure
-        backend_notifier.notify_status(
+        backend_notifier.update_summary_status(
             job_id=job_id,
             status="failed",
             namespace=namespace,
-            error={"message": str(e)}
+            error={"message": str(e), "stack": traceback.format_exc(), "timestamp": str(time.time())},
+            authorization=metadata.get("authorization", "")
         )
         raise
 @celery_app.task(name="generate_comparison", bind=True)
