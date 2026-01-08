@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     CELERY_ENABLE_UTC: bool = True
     
     # MongoDB Configuration
-    MONGO_URI: str = "mongodb://localhost:27017"
-    MONGO_DB_NAME: str = "ai_platform"
+    MONGO_URI: str = "mongodb+srv://sonuv:Sonu12345@cluster0.makyp.mongodb.net/"
+    MONGO_DB_NAME: str = "pdf-summarizer"
     
     # Logging
     LOG_LEVEL: str = "INFO"
@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     REPORT_CREATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/reports/create-report"
     REPORT_STATUS_UPDATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/reports/report-status/update"
     CHAT_STATUS_UPDATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/chats/chat-status/update"
+    SUMMARY_CREATE_URL: str = "http://localhost:5000/api/summaries/create"
+    SUMMARY_STATUS_UPDATE_URL: str = "http://localhost:5000/api/summaries/summary-status/update"
 
     class Config:
         env_file = ".env"

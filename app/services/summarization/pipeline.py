@@ -22,7 +22,7 @@ class SummaryPipeline:
         self.embedding = EmbeddingService()
         self.client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
-    async def _retrieve_context(self, queries: List[str], namespace: str, index_name: str, host: str, vector_top_k: int = 100, rerank_top_n: int = 25) -> str:
+    async def _retrieve_context(self, queries: List[str], namespace: str, index_name: str, host: str, vector_top_k: int = 50, rerank_top_n: int = 15) -> str:
         """
         Runs sub-queries to retrieve context from Pinecone and reranks using Cohere.
         Matches n8n logic (vector topK: 50, rerank topN: 15).
@@ -35,41 +35,41 @@ class SummaryPipeline:
             query_vector = await self.embedding.embed_text(query)
             index = vector_store_service.get_index(index_name, host=host)
             # Prepare query filter
-            query_filter = {"documentName": namespace} if namespace and namespace != "__default__" else None
+            query_filter = {"documentName": namespace} if namespace and namespace != "" else None
 
             search_res = index.query(
                 vector=query_vector,
                 top_k=vector_top_k,
-                namespace=namespace,
+                namespace=namespace or "",
                 include_metadata=True,
                 filter=query_filter
             )
             initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
             logger.info("Namespace search completed", query=query[:50], matches=len(initial_chunks), namespace=namespace)
             
-            # Fallback to __default__ if specified namespace is empty
-            if not initial_chunks and namespace and namespace != "__default__":
+            # Fallback to "" namespace if specified namespace is empty
+            if not initial_chunks and namespace and namespace != "":
                 search_res = index.query(
                     vector=query_vector,
                     top_k=vector_top_k,
-                    namespace="__default__",
+                    namespace="",
                     include_metadata=True,
                     filter=query_filter
                 )
                 initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
                 if initial_chunks:
-                    logger.info("Retrieved chunks from __default__ with metadata filter", query=query[:50], count=len(initial_chunks))
+                    logger.info("Retrieved chunks from \"\" namespace with metadata filter", query=query[:50], count=len(initial_chunks))
                 else:
-                    # Final fallback: query __default__ WITHOUT filter (could be noisy)
+                    # Final fallback: query "" WITHOUT filter (could be noisy)
                     search_res = index.query(
                         vector=query_vector,
                         top_k=vector_top_k,
-                        namespace="__default__",
+                        namespace="",
                         include_metadata=True
                     )
                     initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
                     if initial_chunks:
-                         logger.warning("Falling back to UNFILTERED __default__ search", query=query[:50])
+                         logger.warning("Falling back to UNFILTERED \"\" search", query=query[:50])
             
             # 2. Rerank
             if initial_chunks:
@@ -111,8 +111,13 @@ class SummaryPipeline:
             # STAGE 1: Investor & Share Capital Extractor
             logger.info("Stage 1: Running Investor Extractor Agent")
             investor_context = await self._retrieve_context(
-                ["Extract all equity share capital history and list of investors"],
-                namespace, index_name, host, vector_top_k=20
+                [
+                    "Extract all equity share capital history and list of investors",
+                    "Detailed table of capital structure and share capital history",
+                    "List of all equity shareholders and their shareholding percentages",
+                    "History of equity share capital of the company since incorporation"
+                ],
+                namespace, index_name, host, vector_top_k=40, rerank_top_n=15
             )
             logger.info("Investor context retrieved", length=len(investor_context))
             
@@ -138,6 +143,7 @@ class SummaryPipeline:
             
             import json
             investor_data = json.loads(investor_resp.choices[0].message.content)
+            logger.info("Stage 1 raw data received", keys=list(investor_data.keys()) if isinstance(investor_data, dict) else "list")
             
             # Start research in parallel while parsing investor data
             research_task = asyncio.create_task(research_service.get_adverse_findings(namespace, "Promoters from DRHP"))
@@ -150,35 +156,44 @@ class SummaryPipeline:
             else:
                 results = []
             
-            logger.info("Stage 1 data parsed", result_count=len(results))
+            logger.info("Stage 1 results identified", count=len(results))
             
             investor_html_snippet = ""
+            investor_md = ""
             if results:
-                # Find by type 'summary_report' or just the first content
+                # 1. Extract markdown report content
                 report_obj = next((item for item in results if isinstance(item, dict) and item.get("type") == "summary_report"), None)
                 if report_obj:
-                    investor_html_snippet = formatter.markdown_to_html(report_obj.get("content", ""))
+                    investor_md = report_obj.get("content", "")
+                    investor_html_snippet = formatter.markdown_to_html(investor_md)
+                    logger.info("Stage 1: Found summary_report", md_length=len(investor_md))
                 elif len(results) > 0 and isinstance(results[0], dict):
-                    investor_html_snippet = formatter.markdown_to_html(results[0].get("content", ""))
+                    investor_md = results[0].get("content", "")
+                    investor_html_snippet = formatter.markdown_to_html(investor_md)
+                    logger.info("Stage 1: Falling back to first result object", md_length=len(investor_md))
                 
-                calc_obj = next((item for item in results if isinstance(item, dict) and item.get("type") == "calculation_data"), None)
+                # 2. Extract and calculate premium rounds
+                calc_obj = next((item for item in results if isinstance(item, dict) and (item.get("type") == "calculation_data" or "calculation_parameters" in item)), None)
                 if calc_obj:
-                    calc_data = calc_obj.get("calculation_parameters", {})
+                    calc_data = calc_obj.get("calculation_parameters", {}) or calc_obj
                     premium_params = calc_data.get("premium_rounds", [])
                     if premium_params:
+                        logger.info("Stage 1: Found premium rounds", count=len(premium_params))
                         calc_rounds = valuation_service.calculate_premium_rounds(premium_params)
+                        # HTML version for direct injection (consistent styling)
                         valuation_html = valuation_service.generate_valuation_html(calc_rounds)
                         investor_html_snippet += f"\n\n{valuation_html}"
+                        
+                        # Markdown version for prompt integration (LLM friendly)
+                        valuation_md = valuation_service.generate_valuation_markdown(calc_rounds)
+                        investor_md += f"\n\n{valuation_md}"
+                    else:
+                        logger.info("Stage 1: Premium rounds list is empty")
             
-            # Keep markdown version for prompt injection
-            investor_md = ""
-            if report_obj:
-                 investor_md = report_obj.get("content", "")
-                 if calc_obj:
-                      investor_md += f"\n\n{valuation_service.generate_valuation_html(calc_rounds)}" # valuation is html-ish but markdown handles it
-
             if not investor_html_snippet:
                 logger.warning("No investor content extracted in Stage 1")
+            else:
+                logger.info("Final Investor Snippet prepared", html_len=len(investor_html_snippet), md_len=len(investor_md))
 
             # STAGE 2: Main Generator with Sub-queries
             logger.info("Stage 2: Running Main Summary Generator")
@@ -193,11 +208,11 @@ class SummaryPipeline:
                 model=settings.SUMMARY_MODEL,
                 messages=[
                     {"role": "system", "content": GENERATOR_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Target Document: {namespace}\n\n{stage1_integration}\n\nContext: {main_context[:300000]}"}
+                    {"role": "user", "content": f"Target Document: {namespace}\n\n{stage1_integration}\n\nContext: {main_context[:400000]}"}
                 ],
                 max_tokens=16384
             )
-            logger.info("Main Generator context sent", length=len(main_context[:300000]))
+            logger.info("Main Generator context sent", length=len(main_context[:400000]))
             
             usage = main_gen_resp.usage
             usage_stats["stage2"] = {
@@ -215,11 +230,11 @@ class SummaryPipeline:
                 model=settings.SUMMARY_MODEL,
                 messages=[
                     {"role": "system", "content": VALIDATOR_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Target Document: {namespace}\n\nValidate this DRAFT: {draft_summary}\n\nAgainst CONTEXT: {main_context[:300000]}"}
+                    {"role": "user", "content": f"Target Document: {namespace}\n\nValidate this DRAFT: {draft_summary}\n\nAgainst CONTEXT: {main_context[:400000]}"}
                 ],
                 max_tokens=16384
             )
-            logger.info("Validator context sent", length=len(main_context[:300000]))
+            logger.info("Validator context sent", length=len(main_context[:400000]))
             
             usage = final_resp.usage
             usage_stats["stage3"] = {
@@ -242,22 +257,22 @@ class SummaryPipeline:
             full_raw_report = f"<h1>DRHP Summary Report: {namespace}</h1>\n\n" + final_md
             html_content = formatter.markdown_to_html(full_raw_report)
             
-            # Step 2: Insert Investor Data before SECTION VII
+            # Step 2: Insert Investor Data & Valuation before SECTION VII (making it part of SECTION VI)
             if investor_html_snippet:
                 html_content = formatter.insert_html_before_section(
                     html_content,
                     investor_html_snippet,
                     "SECTION VII",
-                    "Matched Investors & Analysis"
+                    "Investor Analysis & Valuation"
                 )
             
-            # Step 3: Insert Research Data before SECTION XII
+            # Step 3: Insert Research Data before SECTION XII (effectively making it part of SECTION XI)
             if research_html_snippet:
                 html_content = formatter.insert_html_before_section(
                     html_content,
                     research_html_snippet,
                     "SECTION XII",
-                    "Adverse Findings & Research"
+                    "Adverse Finding Report"
                 )
             
             # Step 4: Wrap in Enhanced HTML

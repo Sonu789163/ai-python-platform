@@ -38,15 +38,16 @@ class HTMLFormatter:
         if not insert_html or not isinstance(insert_html, str) or not insert_html.strip():
             return full_html
             
-        pattern = rf'(<h2[^>]*>[^<]*{re.escape(section_header)}[^<]*</h2>)'
+        # Try to match H2 or H3 headers that contain the section_header text
+        pattern = rf'(<(h2|h3)[^>]*>[^<]*{re.escape(section_header)}[^<]*</\2>)'
         match = re.search(pattern, full_html, re.IGNORECASE)
         
         if match:
             insertion_point = match.start()
-            insertion_html = f'<div class="{section_label.lower().replace(" ", "-")}-insertion" style="margin-top:10px; margin-bottom:20px;"><h3 style="color:#4B2A06; font-size:16px; font-weight:700; margin:12px 0;">{section_label}</h3>{insert_html}</div><hr><br>'
+            insertion_html = f'<div class="{section_label.lower().replace(" ", "-")}-insertion" style="margin-top:10px; margin-bottom:20px;"><h3 style="color:#4B2A06; font-size:16px; font-weight:700; margin:12px 0;">{section_label}</h3>{insert_html}</div><hr>'
             return full_html[:insertion_point] + insertion_html + full_html[insertion_point:]
         else:
-            insertion_html = f'<hr><br><div class="{section_label.lower().replace(" ", "-")}-insertion" style="margin-top:10px; margin-bottom:20px;"><h3 style="color:#4B2A06; font-size:16px; font-weight:700; margin:12px 0;">{section_label}</h3>{insert_html}</div>'
+            insertion_html = f'<hr><div class="{section_label.lower().replace(" ", "-")}-insertion" style="margin-top:10px; margin-bottom:20px;"><h3 style="color:#4B2A06; font-size:16px; font-weight:700; margin:12px 0;">{section_label}</h3>{insert_html}</div>'
             return full_html + insertion_html
 
     def wrap_enhanced_html(self, content_html: str, company_name: str) -> str:
@@ -54,7 +55,8 @@ class HTMLFormatter:
         Wraps content in a full HTML page with styling.
         Replicates n8n generateEnhancedHtml function.
         """
-        # Clean up any potential \n artifacts from string concatenation
+        # Remove excessive whitespace/newlines that cause gaps
+        content_html = re.sub(r'(<br>\s*){2,}', '<br>', content_html)
         content_html = content_html.replace('\\n', ' ').replace('\n', ' ')
         
         return f"""
@@ -76,6 +78,10 @@ class HTMLFormatter:
             .label {{ font-size: 11px; color: #6b7280; text-transform: uppercase; font-weight: 700; }}
             .value {{ font-size: 14px; font-weight: 600; color: #111827; }}
             .finding-item {{ border-left: 3px solid #4B2A06; padding-left: 15px; margin-bottom: 15px; background: #f9fafb; padding: 10px; }}
+            .data-table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+            .data-table th {{ background: #f8fafc; padding: 10px; text-align: left; border: 1px solid #e2e8f0; font-size: 12px; }}
+            .data-table td {{ padding: 8px; border: 1px solid #e2e8f0; font-size: 12px; }}
+            p {{ margin: 0 0 10px 0; }}
         </style>
     </head>
     <body>
@@ -88,7 +94,6 @@ class HTMLFormatter:
     def format_research_report(self, data: dict) -> str:
         """
         Converts Perplexity JSON output to a comprehensive HTML report.
-        Replicates n8n 'Code in JavaScript' node logic.
         """
         if not data or "error" in data:
             return f"<div class='research-card'><p>❌ Research Error: {data.get('error', 'No data available')}</p></div>"
@@ -98,57 +103,95 @@ class HTMLFormatter:
         detailed = data.get("detailed_findings", {})
         entity = data.get("entity_network", {})
         metadata = data.get("metadata", {})
+        gaps = data.get("gaps_and_limitations", [])
+        next_steps = data.get("next_steps", [])
         
         risk_level = exec_sum.get("risk_level", "Low")
         risk_class = f"risk-{risk_level.lower()}"
         
         html = f"""
-        <div class="research-card">
-            <div class="grid-2">
-                <div class="grid-item"><div class="label">Adverse Flag</div><div class="value">{'⚠️ YES' if exec_sum.get('adverse_flag') else '✅ NO'}</div></div>
-                <div class="grid-item"><div class="label">Risk Level</div><div class="value"><span class="risk-badge {risk_class}">{risk_level}</span></div></div>
+        <div class="research-card" style="border: 2px solid #e5e7eb; border-radius: 12px; overflow: hidden;">
+            <div style="background: #f9fafb; padding: 15px; border-bottom: 2px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center;">
+                <h2 style="margin: 0; font-size: 18px; color: #111827;">🛡️ ADVERSE FINDINGS & BACKGROUND CHECK</h2>
+                <span class="risk-badge {risk_class}" style="padding: 6px 16px; font-size: 14px;">RISK: {risk_level.upper()}</span>
             </div>
             
-            <div style="margin-bottom: 15px;">
-                <div class="label">Summary of Key Findings</div>
-                <div class="value" style="font-weight: 400;">{exec_sum.get('key_findings', 'No adverse findings identified.')}</div>
-            </div>
+            <div style="padding: 20px;">
+                <div class="grid-2">
+                    <div class="grid-item"><div class="label">Adverse Flag</div><div class="value">{'⚠️ YES' if exec_sum.get('adverse_flag') else '✅ NO'}</div></div>
+                    <div class="grid-item"><div class="label">Investigation Date</div><div class="value">{metadata.get('investigation_date', '-')}</div></div>
+                </div>
+                
+                <div style="margin-top: 20px;">
+                    <div class="label">Executive Summary</div>
+                    <div class="value" style="font-weight: 400; line-height: 1.6; margin-top: 8px;">{exec_sum.get('key_findings', 'No adverse findings identified.')}</div>
+                </div>
 
-            <div class="grid-2">
-                <div class="grid-item"><div class="label">Sanctions</div><div class="value">{exec_sum.get('red_flags_count', {}).get('sanctions', 0)}</div></div>
-                <div class="grid-item"><div class="label">Criminal Cases</div><div class="value">{exec_sum.get('red_flags_count', {}).get('criminal_cases', 0)}</div></div>
-            </div>
+                <h4 style="margin-top: 30px; border-bottom: 1px solid #eee; padding-bottom: 8px;">🔍 Risk Assessment Breakdown</h4>
+                <div class="grid-2" style="margin-top: 15px;">
+                    <div class="grid-item"><div class="label">Financial Crime</div><div class="value">{risk_ass.get('financial_crime_risk', 'Low')}</div></div>
+                    <div class="grid-item"><div class="label">Regulatory</div><div class="value">{risk_ass.get('regulatory_compliance_risk', 'Low')}</div></div>
+                    <div class="grid-item"><div class="label">Reputational</div><div class="value">{risk_ass.get('reputational_risk', 'Low')}</div></div>
+                    <div class="grid-item"><div class="label">Sanctions</div><div class="value">{risk_ass.get('sanctions_risk', 'Low')}</div></div>
+                </div>
 
-            <h4 style="margin-top: 20px; border-bottom: 1px solid #eee;">🔍 Detailed Risk Breakdown</h4>
-            <div class="grid-2">
-                <div class="grid-item"><div class="label">Financial Crime</div><div class="value">{risk_ass.get('financial_crime_risk', 'Low')}</div></div>
-                <div class="grid-item"><div class="label">Regulatory</div><div class="value">{risk_ass.get('regulatory_compliance_risk', 'Low')}</div></div>
-                <div class="grid-item"><div class="label">Reputational</div><div class="value">{risk_ass.get('reputational_risk', 'Low')}</div></div>
-                <div class="grid-item"><div class="label">Litigation</div><div class="value">{risk_ass.get('litigation_risk', 'Low')}</div></div>
-            </div>
+                {self._generate_entity_html("👥 Associated Persons", entity.get("associated_persons", []))}
+                {self._generate_entity_html("🏢 Associated Companies", entity.get("associated_companies", []))}
 
-            {self._generate_findings_html("🚫 Layer 1: Sanctions & Debarment", detailed.get("layer1_sanctions", []))}
-            {self._generate_findings_html("⚖️ Layer 2: Legal & Regulatory Actions", detailed.get("layer2_legal_regulatory", []))}
-            {self._generate_findings_html("📰 Layer 3: OSINT & Media Intelligence", detailed.get("layer3_osint_media", []))}
-            
-            <div style="font-size: 11px; color: #9ca3af; margin-top: 20px; text-align: right;">
-                Sources checked: {metadata.get('total_sources_checked', 0)} | Jurisdictions: {', '.join(metadata.get('jurisdictions_searched', []))}
+                {self._generate_findings_html("🚫 Layer 1: Sanctions & Debarment", detailed.get("layer1_sanctions", []))}
+                {self._generate_findings_html("⚖️ Layer 2: Legal & Regulatory Actions", detailed.get("layer2_legal_regulatory", []))}
+                {self._generate_findings_html("📰 Layer 3: OSINT & Media Intelligence", detailed.get("layer3_osint_media", []))}
+                
+                {self._generate_list_html("⚠️ Gaps & Limitations", gaps)}
+                {self._generate_list_html("🚀 Recommended Next Steps", next_steps)}
+
+                <div style="font-size: 11px; color: #9ca3af; margin-top: 25px; text-align: right; border-top: 1px solid #f3f4f6; padding-top: 10px;">
+                    Sources checked: {metadata.get('total_sources_checked', 0)} | Jurisdictions: {', '.join(metadata.get('jurisdictions_searched', []))}
+                </div>
             </div>
         </div>
         """
         return html
 
+    def _generate_entity_html(self, title, entities):
+        if not entities:
+            return ""
+        
+        html = f"<h4 style='margin-top: 25px; border-bottom: 1px solid #eee; padding-bottom: 8px;'>{title}</h4>"
+        html += "<div style='margin-top: 10px;'>"
+        for e in entities:
+            html += f"""
+            <div style="margin-bottom: 12px; padding: 12px; background: #f8fafc; border-radius: 8px; border-left: 4px solid #3b82f6;">
+                <div style="font-weight: 700; color: #1e40af;">{e.get('name', 'Unnamed')}</div>
+                <div style="font-size: 13px; color: #475569; margin-top: 4px;"><strong>Role:</strong> {e.get('role', '-')}</div>
+                <div style="font-size: 12px; color: #64748b; margin-top: 2px;">{e.get('relationship_basis') or e.get('adverse_links_summary') or ''}</div>
+            </div>
+            """
+        html += "</div>"
+        return html
+
+    def _generate_list_html(self, title, items):
+        if not items:
+            return ""
+        
+        html = f"<h4 style='margin-top: 25px; border-bottom: 1px solid #eee; padding-bottom: 8px;'>{title}</h4>"
+        html += "<ul style='margin-top: 10px; padding-left: 20px;'>"
+        for item in items:
+            html += f"<li style='margin-bottom: 8px; font-size: 13px; color: #374151; line-height: 1.5;'>{item}</li>"
+        html += "</ul>"
+        return html
+
     def _generate_findings_html(self, title, items):
         if not items:
-            return f"<p style='font-size: 12px; color: #059669;'>✅ No records found for {title.split(':')[-1].strip()}</p>"
+            return f"<p style='font-size: 12px; color: #059669; margin-top: 20px;'>✅ No records found for {title.split(':')[-1].strip()}</p>"
         
-        html = f"<h5>{title}</h5>"
+        html = f"<h4 style='margin-top: 25px; border-bottom: 1px solid #eee; padding-bottom: 8px;'>{title}</h4>"
         for item in items:
             html += f"""
-            <div class="finding-item">
+            <div class="finding-item" style="margin-top: 15px;">
                 <div class="value">{item.get('matched_entity') or item.get('headline') or item.get('parties') or 'Finding'}</div>
-                <div style="font-size: 12px; color: #4b5563;">{item.get('reason') or item.get('snippet') or item.get('allegations') or ''}</div>
-                {f'<div style="font-size: 11px; margin-top:5px;">Source: <a href="{item.get("source_url") or item.get("url")}" target="_blank">View Link</a></div>' if item.get('source_url') or item.get('url') else ''}
+                <div style="font-size: 12px; color: #4b5563; margin-top: 4px;">{item.get('reason') or item.get('snippet') or item.get('allegations') or ''}</div>
+                {f'<div style="font-size: 11px; margin-top:6px;">Source: <a href="{item.get("source_url") or item.get("url")}" target="_blank" style="color: #2563eb;">View Reference</a></div>' if item.get('source_url') or item.get('url') else ''}
             </div>
             """
         return html
@@ -208,18 +251,38 @@ class HTMLFormatter:
         html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html)
         html = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html)
 
-        # 4. Lists
-        html = re.sub(r'^\* (.*)$', r'<li>\1</li>', html, flags=re.M)
-        html = re.sub(r'^- (.*)$', r'<li>\1</li>', html, flags=re.M)
+        # 4. Lists (with UL wrapping)
+        html = re.sub(r'^[*-] (.*)$', r'<li>\1</li>', html, flags=re.M)
+        html = re.sub(r'(<li>.*?</li>(?:\s*<li>.*?</li>)*)', r'<ul>\1</ul>', html, flags=re.S)
 
-        # 5. Ratios/Currency styling
+        # 5. Links
+        html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank" style="color: #2563eb;">\1</a>', html)
+
+        # 6. Ratios/Currency styling
         html = re.sub(r'(\d+\.?\d*)\s*%', r'<span class="percentage">\1%</span>', html)
         html = re.sub(r'₹\s*(\d+(?:,\d+)*(?:\.\d+)?)', r'<span class="currency">₹\1</span>', html)
 
-        # 6. Paragraphs and line breaks
+        # 7. Paragraphs and line breaks (Improved)
+        # Avoid double wrapping if already processed by table/header logic
         html = html.replace('\n\n', '</p><p>')
-        html = html.replace('\n', '<br>')
         
+        # Only add <br> if it's not following a block tag
+        lines = html.split('\n')
+        processed_lines = []
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            if re.match(r'<(h1|h2|h3|table|thead|tbody|tr|th|td|div|hr|li|p|ul|ol|a)', line):
+                processed_lines.append(line)
+            else:
+                processed_lines.append(line + '<br>')
+        
+        html = ''.join(processed_lines)
+        
+        # Wrap the whole thing in a p if it doesn't start with a block tag
+        if not re.match(r'^\s*<(h1|h2|h3|table|div|p|ul|ol)', html):
+            html = f'<p>{html}</p>'
+
         return html
 
 formatter = HTMLFormatter()

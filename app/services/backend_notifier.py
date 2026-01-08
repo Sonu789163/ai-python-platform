@@ -201,6 +201,86 @@ class BackendNotifier:
             logger.error("Failed to update chat status", error=str(e), job_id=job_id)
             return False
 
+    @staticmethod
+    def update_summary_status(
+        job_id: str,
+        namespace: str,
+        status: str,
+        error: Optional[Dict[str, Any]] = None,
+        authorization: str = ""
+    ) -> bool:
+        """
+        Updates the final status of a summary request.
+        """
+        payload = {
+            "jobId": job_id,
+            "namespace": namespace,
+            "status": status,
+            "error": error or {
+                "message": None,
+                "stack": None,
+                "timestamp": str(time.time())
+            }
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        if authorization:
+            headers["Authorization"] = authorization
+            
+        try:
+            logger.info("Updating summary status", job_id=job_id, status=status)
+            response = requests.post(
+                settings.SUMMARY_STATUS_UPDATE_URL,
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            logger.info("Summary status updated successfully", status_code=response.status_code)
+            return True
+        except Exception as e:
+            logger.error("Failed to update summary status", error=str(e), job_id=job_id)
+            return False
+
+    @staticmethod
+    def create_summary(
+        title: str,
+        content: str,
+        document_id: str,
+        domain: str = "",
+        domain_id: str = "",
+        authorization: str = ""
+    ) -> bool:
+        """
+        Creates a summary record in the backend.
+        """
+        payload = {
+            "title": title,
+            "content": content,
+            "documentId": document_id,
+            "domain": domain,
+            "domainId": domain_id
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        if authorization:
+            headers["Authorization"] = authorization
+            
+        try:
+            logger.info("Creating summary in backend", title=title, document_id=document_id)
+            response = requests.post(
+                settings.SUMMARY_CREATE_URL,
+                json=payload,
+                headers=headers,
+                timeout=20
+            )
+            response.raise_for_status()
+            logger.info("Summary created successfully", status_code=response.status_code)
+            return True
+        except Exception as e:
+            logger.error("Failed to create summary", error=str(e), document_id=document_id)
+            return False
+
 
 # Global service instance
 backend_notifier = BackendNotifier()

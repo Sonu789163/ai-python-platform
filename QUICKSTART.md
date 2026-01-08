@@ -36,7 +36,49 @@ celery -A app.workers.celery_app worker --loglevel=info --pool=solo
 curl http://localhost:8000/health
 ```
 
-### 4. Test Ingestion (Synchronous)
+---
+
+## 🐳 Docker Deployment (Recommended)
+
+If you have Docker installed, you can launch the entire stack (API, Workers, Redis) with a single command.
+
+### 1. Build and Start
+```bash
+# Build images and start all services in the background
+docker-compose up -d --build
+```
+
+### 2. View Logs
+```bash
+# View live logs for all services
+docker-compose logs -f
+
+# View logs for the API only
+docker-compose logs -f api
+
+# View logs for the Workers only
+docker-compose logs -f worker
+```
+
+### 3. Update Code
+If you make changes to the Python code, you MUST rebuild to see the changes:
+```bash
+# Rebuild and restart the containers
+docker-compose up -d --build
+```
+
+### 4. Stop and Clean
+```bash
+# Stop all containers
+docker-compose stop
+
+# Stop and REMOVE all containers, networks, and orphaned services
+docker-compose down --remove-orphans
+```
+
+---
+
+## 4. Test Ingestion (Synchronous)
 
 The Ingestion layer is now **synchronous**, meaning you get the results immediately!
 

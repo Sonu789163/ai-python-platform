@@ -37,7 +37,7 @@ class ChatService:
             index = vector_store_service.get_index(index_name, host=host)
             
             # Filter by documentName metadata
-            query_filter = {"documentName": namespace} if namespace and namespace != "__default__" else None
+            query_filter = {"documentName": namespace} if namespace and namespace != "" else None
 
             # First try: Specified namespace
             search_res = index.query(
@@ -49,25 +49,25 @@ class ChatService:
             )
             initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
             
-            # Fallback 1: __default__ namespace WITH filter
-            if not initial_chunks and namespace and namespace != "__default__":
-                logger.info(f"Chat retry in __default__ namespace for {namespace}")
+            # Fallback 1: "" namespace WITH filter
+            if not initial_chunks and namespace and namespace != "":
+                logger.info(f"Chat retry in \"\" namespace for {namespace}")
                 search_res = index.query(
                     vector=query_vector,
                     top_k=top_k,
-                    namespace="__default__",
+                    namespace="",
                     include_metadata=True,
                     filter=query_filter
                 )
                 initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
 
-            # Fallback 2: __default__ namespace WITHOUT filter
-            if not initial_chunks and namespace and namespace != "__default__":
-                logger.warning(f"Chat final fallback in __default__ for {namespace}")
+            # Fallback 2: "" namespace WITHOUT filter
+            if not initial_chunks and namespace and namespace != "":
+                logger.warning(f"Chat final fallback in \"\" for {namespace}")
                 search_res = index.query(
                     vector=query_vector,
                     top_k=top_k,
-                    namespace="__default__",
+                    namespace="",
                     include_metadata=True
                 )
                 initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
