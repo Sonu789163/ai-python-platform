@@ -4,12 +4,20 @@ Orchestrates multi-stage generation, validation, and research.
 """
 import asyncio
 import time
+import json
 from typing import Dict, Any, List
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.services.vector_store import vector_store_service
 from app.services.embedding import EmbeddingService
-from app.services.summarization.prompts import SUBQUERIES, GENERATOR_SYSTEM_PROMPT, VALIDATOR_SYSTEM_PROMPT
+from app.services.summarization.prompts import (
+    SUBQUERIES, 
+    INVESTOR_EXTRACTOR_SYSTEM_PROMPT,
+    CAPITAL_HISTORY_EXTRACTOR_PROMPT,
+    MAIN_SUMMARY_SYSTEM_PROMPT,
+    SUMMARY_VALIDATOR_SYSTEM_PROMPT,
+    TARGET_INVESTORS
+)
 from app.services.summarization.research import research_service
 from app.services.summarization.valuation import valuation_service
 import openai
@@ -25,16 +33,13 @@ class SummaryPipeline:
     async def _retrieve_context(self, queries: List[str], namespace: str, index_name: str, host: str, vector_top_k: int = 50, rerank_top_n: int = 15) -> str:
         """
         Runs sub-queries to retrieve context from Pinecone and reranks using Cohere.
-        Matches n8n logic (vector topK: 50, rerank topN: 15).
         """
         from app.services.rerank import rerank_service
         
         all_context = []
         for query in queries:
-            # 1. Vector Search
             query_vector = await self.embedding.embed_text(query)
             index = vector_store_service.get_index(index_name, host=host)
-            # Prepare query filter
             query_filter = {"documentName": namespace} if namespace and namespace != "" else None
 
             search_res = index.query(
@@ -45,38 +50,11 @@ class SummaryPipeline:
                 filter=query_filter
             )
             initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
-            logger.info("Namespace search completed", query=query[:50], matches=len(initial_chunks), namespace=namespace)
             
-            # Fallback to "" namespace if specified namespace is empty
-            if not initial_chunks and namespace and namespace != "":
-                search_res = index.query(
-                    vector=query_vector,
-                    top_k=vector_top_k,
-                    namespace="",
-                    include_metadata=True,
-                    filter=query_filter
-                )
-                initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
-                if initial_chunks:
-                    logger.info("Retrieved chunks from \"\" namespace with metadata filter", query=query[:50], count=len(initial_chunks))
-                else:
-                    # Final fallback: query "" WITHOUT filter (could be noisy)
-                    search_res = index.query(
-                        vector=query_vector,
-                        top_k=vector_top_k,
-                        namespace="",
-                        include_metadata=True
-                    )
-                    initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
-                    if initial_chunks:
-                         logger.warning("Falling back to UNFILTERED \"\" search", query=query[:50])
-            
-            # 2. Rerank
             if initial_chunks:
                 reranked_chunks = rerank_service.rerank(query, initial_chunks, top_n=rerank_top_n)
                 all_context.extend(reranked_chunks)
             
-        # Preserve order while removing duplicates
         seen = set()
         unique_context = []
         for chunk in all_context:
@@ -84,215 +62,178 @@ class SummaryPipeline:
                 unique_context.append(chunk)
                 seen.add(chunk)
                 
-        final_context = "\n---\n".join(unique_context)
-        logger.info("Context retrieval finished", 
-                    total_queries=len(queries), 
-                    total_chars=len(final_context),
-                    namespace=namespace)
-        return final_context
+        return "\n---\n".join(unique_context)
 
-    async def generate(self, namespace: str, doc_type: str = "drhp") -> Dict[str, Any]:
+    def _recalculate_investor_percentages(self, investors: List[Dict], total_shares: float) -> List[Dict]:
+        """Code-based recalculation of shareholding percentages."""
+        if not total_shares or total_shares <= 0:
+            return investors
+        
+        results = []
+        for inv in investors:
+            shares = inv.get("number_of_equity_shares", 0)
+            if isinstance(shares, str):
+                try: shares = float(shares.replace(',', ''))
+                except: shares = 0
+            
+            percentage = (shares / total_shares) * 100
+            # Matches n8n logic: toFixed(10) then replace trailing zeros
+            percentage_str = f"{percentage:.10f}".rstrip('0').rstrip('.') + "%"
+            
+            results.append({
+                **inv,
+                "number_of_equity_shares": shares,
+                "percentage_of_pre_issue_capital": percentage_str
+            })
+        return results
+
+    def _match_investors(self, extracted: List[Dict], target_list: List[str]) -> List[Dict]:
+        """Exact matching of extracted investors against target list."""
+        matched = []
+        target_lower = [t.lower().strip() for t in target_list]
+        
+        for inv in extracted:
+            name = inv.get("investor_name") or inv.get("name")
+            if not name: continue
+            
+            if name.lower().strip() in target_lower:
+                matched.append({
+                    "investor_name": name,
+                    "number_of_equity_shares": inv.get("number_of_equity_shares", 0),
+                    "percentage_of_capital": inv.get("percentage_of_pre_issue_capital", "0%"),
+                    "investor_category": inv.get("investor_category", "Unknown")
+                })
+        return matched
+
+    async def generate(self, namespace: str, doc_type: str = "drhp", fund_config: Dict = None) -> Dict[str, Any]:
         """
-        Executes the full 3-agent summarization pipeline.
+        Executes the refactored 4-agent summarization pipeline with Fund-specific toggles.
         """
         start_time = time.time()
-        logger.info("Starting 3-agent summary pipeline", namespace=namespace, doc_type=doc_type)
-        usage_stats = {}
+        fund_config = fund_config or {}
+        
+        # Extract fund configuration/toggles
+        use_matching = fund_config.get("investor_match_only", True)
+        use_valuation = fund_config.get("valuation_matching", True)
+        use_research = fund_config.get("adverse_finding", True)
+        target_investor_list = fund_config.get("target_investors") or TARGET_INVESTORS
+        custom_sop = fund_config.get("custom_summary_sop") or MAIN_SUMMARY_SYSTEM_PROMPT
+        custom_checklist = fund_config.get("validator_checklist", [])
 
         try:
-            # 0. Determine Pinecone settings
-            if doc_type == "rhp":
-                index_name = settings.PINECONE_RHP_INDEX
-                host = settings.PINECONE_RHP_HOST
-            else:
-                index_name = settings.PINECONE_DRHP_INDEX
-                host = settings.PINECONE_DRHP_HOST
+            index_name = settings.PINECONE_RHP_INDEX if doc_type == "rhp" else settings.PINECONE_DRHP_INDEX
+            host = settings.PINECONE_RHP_HOST if doc_type == "rhp" else settings.PINECONE_DRHP_HOST
 
-            # STAGE 1: Investor & Share Capital Extractor
-            logger.info("Stage 1: Running Investor Extractor Agent")
-            investor_context = await self._retrieve_context(
-                [
-                    "Extract all equity share capital history and list of investors",
-                    "Detailed table of capital structure and share capital history",
-                    "List of all equity shareholders and their shareholding percentages",
-                    "History of equity share capital of the company since incorporation"
-                ],
-                namespace, index_name, host, vector_top_k=40, rerank_top_n=15
-            )
-            logger.info("Investor context retrieved", length=len(investor_context))
+            # STAGE 1: Context Retrieval (Parallel)
+            logger.info("Retrieving context for enabled agents")
+            ctx_tasks = [
+                self._retrieve_context(["Extract all types of shareholders, promoter, public shareholders and total capital"], namespace, index_name, host, 40, 15),
+                self._retrieve_context(["Extract equity share capital history table and identify premium rounds"], namespace, index_name, host, 40, 15),
+                self._retrieve_context(SUBQUERIES, namespace, index_name, host)
+            ]
             
-            from app.services.summarization.prompts import INVESTOR_EXTRACTOR_SYSTEM_PROMPT
-            investor_resp = await self.client.chat.completions.create(
+            ctx_results = await asyncio.gather(*ctx_tasks)
+            investor_ctx = ctx_results[0]
+            capital_ctx = ctx_results[1]
+            main_ctx = ctx_results[2]
+
+            # STAGE 2: Parallel Agent Execution
+            llm_tasks = []
+            
+            # Agent 1: Investor Extractor
+            llm_tasks.append(self.client.chat.completions.create(
+                model=settings.SUMMARY_MODEL,
+                messages=[{"role": "system", "content": INVESTOR_EXTRACTOR_SYSTEM_PROMPT}, {"role": "user", "content": f"Extract for {namespace}: {investor_ctx}"}],
+                response_format={"type": "json_object"}
+            ))
+            
+            # Agent 2: Capital History Extractor (Always called for raw table)
+            llm_tasks.append(self.client.chat.completions.create(
+                model=settings.SUMMARY_MODEL,
+                messages=[{"role": "system", "content": CAPITAL_HISTORY_EXTRACTOR_PROMPT}, {"role": "user", "content": f"Extract for {namespace}: {capital_ctx}"}],
+                response_format={"type": "json_object"}
+            ))
+            
+            # Agent 3: Main Summary Generator
+            llm_tasks.append(self.client.chat.completions.create(
+                model=settings.SUMMARY_MODEL,
+                messages=[{"role": "system", "content": custom_sop}, {"role": "user", "content": f"Generate for {namespace}: {main_ctx[:400000]}"}],
+                max_tokens=16000
+            ))
+            
+            # Research Task (Conditional)
+            research_task = None
+            if use_research:
+                research_task = asyncio.create_task(research_service.get_adverse_findings(namespace, "Promoters from DRHP"))
+            
+            llm_results = await asyncio.gather(*llm_tasks)
+            
+            # --- POST-PROCESSING ---
+
+            # Parse Agent 1 (Investors)
+            data1 = json.loads(llm_results[0].choices[0].message.content)
+            extracted_inv = data1.get("section_a_extracted_investors", [])
+            total_shares = data1.get("total_share_issue", 0)
+            
+            recalculated_inv = self._recalculate_investor_percentages(extracted_inv, total_shares)
+            matched_inv = self._match_investors(recalculated_inv, target_investor_list) if use_matching else []
+            investor_html = formatter.generate_investor_report_html(recalculated_inv, matched_inv, show_matches=use_matching)
+
+            # Parse Agent 2 (Capital & Valuation)
+            data2 = json.loads(llm_results[1].choices[0].message.content)
+            raw_table_md = data2.get("content", "")
+            valuation_html = ""
+            if use_valuation:
+                calc_params = data2.get("calculation_parameters", {}).get("premium_rounds", [])
+                calculated_rounds = valuation_service.calculate_premium_rounds(calc_params) if calc_params else []
+                calc_html = valuation_service.generate_valuation_html(calculated_rounds)
+                valuation_html = formatter.generate_valuation_report_html(raw_table_md, calc_html, show_calculations=True)
+            else:
+                valuation_html = formatter.generate_valuation_report_html(raw_table_md, show_calculations=False)
+
+            # Parse Agent 3 (Draft Summary)
+            draft_summary = llm_results[2].choices[0].message.content
+
+            # STAGE 3: Agent 4 (Validator)
+            validator_prompt = SUMMARY_VALIDATOR_SYSTEM_PROMPT
+            if custom_checklist:
+                validator_prompt += f"\n\n### FUND-SPECIFIC VERIFICATION CHECKLIST:\n" + "\n".join([f"- {c}" for c in custom_checklist])
+
+            agent4_resp = await self.client.chat.completions.create(
                 model=settings.SUMMARY_MODEL,
                 messages=[
-                    {"role": "system", "content": INVESTOR_EXTRACTOR_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Extract data for {namespace} from: {investor_context}"}
+                    {"role": "system", "content": validator_prompt},
+                    {"role": "user", "content": f"Draft: {draft_summary}\n\nContext: {main_ctx[:100000]}"}
                 ],
-                response_format={"type": "json_object"},
-                max_tokens=4000
+                max_tokens=16000
             )
-            
-            # Log usage
-            usage = investor_resp.usage
-            usage_stats["stage1"] = {
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens,
-                "total_tokens": usage.total_tokens
-            }
-            logger.info("Stage 1 LLM completed", **usage_stats["stage1"])
-            
-            import json
-            investor_data = json.loads(investor_resp.choices[0].message.content)
-            logger.info("Stage 1 raw data received", keys=list(investor_data.keys()) if isinstance(investor_data, dict) else "list")
-            
-            # Start research in parallel while parsing investor data
-            research_task = asyncio.create_task(research_service.get_adverse_findings(namespace, "Promoters from DRHP"))
-            
-            # Handle list or object response
-            if isinstance(investor_data, list):
-                results = investor_data
-            elif isinstance(investor_data, dict):
-                results = investor_data.get("results", []) or [investor_data]
-            else:
-                results = []
-            
-            logger.info("Stage 1 results identified", count=len(results))
-            
-            investor_html_snippet = ""
-            investor_md = ""
-            if results:
-                # 1. Extract markdown report content
-                report_obj = next((item for item in results if isinstance(item, dict) and item.get("type") == "summary_report"), None)
-                if report_obj:
-                    investor_md = report_obj.get("content", "")
-                    investor_html_snippet = formatter.markdown_to_html(investor_md)
-                    logger.info("Stage 1: Found summary_report", md_length=len(investor_md))
-                elif len(results) > 0 and isinstance(results[0], dict):
-                    investor_md = results[0].get("content", "")
-                    investor_html_snippet = formatter.markdown_to_html(investor_md)
-                    logger.info("Stage 1: Falling back to first result object", md_length=len(investor_md))
-                
-                # 2. Extract and calculate premium rounds
-                calc_obj = next((item for item in results if isinstance(item, dict) and (item.get("type") == "calculation_data" or "calculation_parameters" in item)), None)
-                if calc_obj:
-                    calc_data = calc_obj.get("calculation_parameters", {}) or calc_obj
-                    premium_params = calc_data.get("premium_rounds", [])
-                    if premium_params:
-                        logger.info("Stage 1: Found premium rounds", count=len(premium_params))
-                        calc_rounds = valuation_service.calculate_premium_rounds(premium_params)
-                        # HTML version for direct injection (consistent styling)
-                        valuation_html = valuation_service.generate_valuation_html(calc_rounds)
-                        investor_html_snippet += f"\n\n{valuation_html}"
-                        
-                        # Markdown version for prompt integration (LLM friendly)
-                        valuation_md = valuation_service.generate_valuation_markdown(calc_rounds)
-                        investor_md += f"\n\n{valuation_md}"
-                    else:
-                        logger.info("Stage 1: Premium rounds list is empty")
-            
-            if not investor_html_snippet:
-                logger.warning("No investor content extracted in Stage 1")
-            else:
-                logger.info("Final Investor Snippet prepared", html_len=len(investor_html_snippet), md_len=len(investor_md))
+            final_md = agent4_resp.choices[0].message.content
 
-            # STAGE 2: Main Generator with Sub-queries
-            logger.info("Stage 2: Running Main Summary Generator")
-            main_context = await self._retrieve_context(SUBQUERIES, namespace, index_name, host)
-            
-            # Prepare Stage 1 integration prompt
-            stage1_integration = ""
-            if investor_md:
-                stage1_integration = f"\n\n### MANDATORY DATA FOR SECTION VI (INTEGRATE THIS TABLES/DATA INTO SECTION VI):\n{investor_md}\n\n"
+            # ASSEMBLY
+            final_report_html = formatter.markdown_to_html(final_md)
+            if investor_html:
+                final_report_html = formatter.insert_html_before_section(final_report_html, investor_html, "SECTION VII", "Investor Analysis")
+            if valuation_html:
+                final_report_html = formatter.insert_html_before_section(final_report_html, valuation_html, "SECTION VII", "Valuation Analysis")
 
-            main_gen_resp = await self.client.chat.completions.create(
-                model=settings.SUMMARY_MODEL,
-                messages=[
-                    {"role": "system", "content": GENERATOR_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Target Document: {namespace}\n\n{stage1_integration}\n\nContext: {main_context[:400000]}"}
-                ],
-                max_tokens=16384
-            )
-            logger.info("Main Generator context sent", length=len(main_context[:400000]))
-            
-            usage = main_gen_resp.usage
-            usage_stats["stage2"] = {
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens,
-                "total_tokens": usage.total_tokens
-            }
-            logger.info("Stage 2 LLM completed", **usage_stats["stage2"])
-            
-            draft_summary = main_gen_resp.choices[0].message.content
+            if research_task:
+                research_data = await research_task
+                research_html = formatter.format_research_report(research_data)
+                if research_html:
+                    final_report_html = formatter.insert_html_before_section(final_report_html, research_html, "SECTION XII", "Adverse Findings")
 
-            # STAGE 3: Validation Agent
-            logger.info("Stage 3: Running Validator Agent")
-            final_resp = await self.client.chat.completions.create(
-                model=settings.SUMMARY_MODEL,
-                messages=[
-                    {"role": "system", "content": VALIDATOR_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Target Document: {namespace}\n\nValidate this DRAFT: {draft_summary}\n\nAgainst CONTEXT: {main_context[:400000]}"}
-                ],
-                max_tokens=16384
-            )
-            logger.info("Validator context sent", length=len(main_context[:400000]))
-            
-            usage = final_resp.usage
-            usage_stats["stage3"] = {
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens,
-                "total_tokens": usage.total_tokens
-            }
-            logger.info("Stage 3 LLM completed", **usage_stats["stage3"])
-            
-            final_md = final_resp.choices[0].message.content
+            final_html = formatter.wrap_enhanced_html(final_report_html, data1.get("company_name", namespace))
 
-            # Wait for research to finish
-            research_data = await research_task
-            research_html_snippet = formatter.format_research_report(research_data)
-
-            # 6. Final Formatting and Injection
-            # Replicate n8n merge logic
-            
-            # Step 1: Base summary to HTML snippet
-            full_raw_report = f"<h1>DRHP Summary Report: {namespace}</h1>\n\n" + final_md
-            html_content = formatter.markdown_to_html(full_raw_report)
-            
-            # Step 2: Insert Investor Data & Valuation before SECTION VII (making it part of SECTION VI)
-            if investor_html_snippet:
-                html_content = formatter.insert_html_before_section(
-                    html_content,
-                    investor_html_snippet,
-                    "SECTION VII",
-                    "Investor Analysis & Valuation"
-                )
-            
-            # Step 3: Insert Research Data before SECTION XII (effectively making it part of SECTION XI)
-            if research_html_snippet:
-                html_content = formatter.insert_html_before_section(
-                    html_content,
-                    research_html_snippet,
-                    "SECTION XII",
-                    "Adverse Finding Report"
-                )
-            
-            # Step 4: Wrap in Enhanced HTML
-            final_html = formatter.wrap_enhanced_html(html_content, namespace)
-
-            duration = time.time() - start_time
             return {
                 "status": "success",
                 "html": final_html,
                 "summary": final_md,
-                "duration": duration,
-                "namespace": namespace,
-                "usage_stats": usage_stats,
-                "research_data": research_data
+                "duration": time.time() - start_time,
+                "namespace": namespace
             }
 
         except Exception as e:
-            logger.error("Pipeline failed", error=str(e), exc_info=True)
+            logger.error(f"Pipeline failed: {str(e)}", exc_info=True)
             raise
-
-    # Removed _convert_to_html in favor of formatter service
 
 summary_pipeline = SummaryPipeline()

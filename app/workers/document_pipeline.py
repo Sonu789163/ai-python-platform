@@ -200,8 +200,13 @@ def generate_summary(
     )
     
     try:
-        # Run the async pipeline in a sync context for Celery
-        result = asyncio.run(summary_pipeline.generate(namespace, doc_type))
+        # Fetch Fund Configuration
+        from app.services.fund_service import fund_service
+        domain_id = metadata.get("domainId")
+        fund_config = fund_service.get_fund_config(domain_id) if domain_id else {}
+        
+        # Run the async pipeline with fund config
+        result = asyncio.run(summary_pipeline.generate(namespace, doc_type, fund_config))
         
         # Notify Backend of Success - First create the record
         if result.get("status") == "success":
