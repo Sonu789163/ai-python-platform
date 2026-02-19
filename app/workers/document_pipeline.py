@@ -36,11 +36,8 @@ def process_document(
     bound_logger = log_job_start(logger, job_id, "data_ingestion", file_type=file_type, doc_type=doc_type)
     
     try:
-        # Determine Pinecone Index
-        if doc_type == "rhp":
-            index_name = settings.PINECONE_RHP_INDEX
-        else:
-            index_name = settings.PINECONE_DRHP_INDEX
+        # Determine Pinecone Index (Consolidated)
+        index_name = settings.PINECONE_DRHP_INDEX
             
         # Stage 1: Retrieve document (In prod, you would download from S3/Vercel Blob)
         bound_logger.info("Retrieving document", file_url=file_url)
@@ -48,31 +45,68 @@ def process_document(
         resp = requests.get(file_url, timeout=30)
         resp.raise_for_status()
         file_content = resp.content
+        bound_logger.info(f"Document downloaded. Size: {len(file_content)} bytes")
         
         # Stage 2: Extract and Clean Text (Matched to n8n "Cleaned text1" logic)
         bound_logger.info("Extracting and cleaning text")
         extraction_result = extraction_service.extract_text(file_content, file_type)
         text = extraction_result["text"]
         
+        if not text or len(text) < 100:
+             bound_logger.error("Text extraction failed or returned very little text", text_len=len(text) if text else 0)
+             raise Exception("Text extraction yielded insufficient content")
+             
+        bound_logger.info(f"Text extracted. Length: {len(text)} characters")
+
+        
         # Stage 3: Chunk text (Matched to n8n "Recursive Character Text Splitter" 4000/800)
         bound_logger.info("Splitting text into chunks")
+        
+        # Debug: Check specifically for "SECTION III" content in raw text
+        if "SECTION III" in text or "BUSINESS OVERVIEW" in text:
+             bound_logger.info("SECTION III / BUSINESS OVERVIEW header found in raw extracted text")
+        else:
+             bound_logger.warning("SECTION III / BUSINESS OVERVIEW header NOT found in extracted text")
+
+        chunk_metadata = {
+            "source": file_url,
+            "job_id": job_id,
+            "documentName": filename,
+            "documentId": metadata.get("documentId", ""),
+            "domain": metadata.get("domain", ""),
+            "domainId": metadata.get("domainId", ""),
+            "type": doc_type.upper() if doc_type else "DRHP"
+        }
+        
         chunks = chunking_service.chunk_with_metadata(
             text,
-            metadata={"source": file_url, "doc_type": doc_type, "job_id": job_id}
+            metadata=chunk_metadata
         )
+        bound_logger.info(f"Generated {len(chunks)} chunks")
+        
+        # Monitor chunk content sample
+        if len(chunks) > 0:
+             bound_logger.info(f"Sample Chunk 0 Length: {len(chunks[0]['chunk_text'])}")
+
         
         # Stage 4: Generate Embeddings (Matched to n8n "text-embedding-3-large")
         bound_logger.info("Generating OpenAI embeddings", count=len(chunks))
         # Embedding service call (sync wrapper around LangChain)
         chunks_with_embeddings = asyncio.run(embedding_service.embed_chunks(chunks))
         
+        if len(chunks_with_embeddings) > 0:
+             emb_len = len(chunks_with_embeddings[0].get("values", []))
+             bound_logger.info(f"Embedding generated. Dimension: {emb_len}")
+        
         # Stage 5: Upsert to Pinecone
         bound_logger.info("Upserting to Pinecone", index=index_name)
         upsert_res = vector_store_service.upsert_chunks(
             chunks=chunks_with_embeddings,
             index_name=index_name,
-            namespace=filename
+            namespace=filename,
+            host=settings.PINECONE_DRHP_HOST
         )
+        bound_logger.info(f"Upsert Response: {upsert_res}")
         
         # Stage 6: Store processing record in MongoDB
         if not mongodb.sync_db:
@@ -199,20 +233,37 @@ def generate_summary(
         doc_type=doc_type
     )
     
-    try:
+    async def _run_summary():
         # Fetch Fund Configuration
         from app.services.fund_service import fund_service
         domain_id = metadata.get("domainId")
-        fund_config = fund_service.get_fund_config(domain_id) if domain_id else {}
+        fund_config = await fund_service.get_fund_config(domain_id) if domain_id else {}
+        
+        # Select correct index based on doc_type (Single Index Strategy)
+        index_name = settings.PINECONE_DRHP_INDEX
+        host = settings.PINECONE_DRHP_HOST
         
         # Run the async pipeline with fund config
-        result = asyncio.run(summary_pipeline.generate(namespace, doc_type, fund_config))
+        return await summary_pipeline.generate_summary(
+            namespace=namespace,
+            domain_id=domain_id,
+            tenant_config=fund_config,
+            index_name=index_name,
+            host=host
+        )
+    
+    try:
+        # Run in a single async context
+        result = asyncio.run(_run_summary())
         
         # Notify Backend of Success - First create the record
         if result.get("status") == "success":
+            # Use markdown if html is not provided (pipeline returns markdown)
+            content = result.get("html") or result.get("markdown", "")
+            
             backend_notifier.create_summary(
                 title=f"Summary: {namespace}",
-                content=result.get("html", ""),
+                content=content,
                 document_id=metadata.get("documentId", ""),
                 domain=metadata.get("domain", ""),
                 domain_id=metadata.get("domainId", ""),
@@ -228,7 +279,21 @@ def generate_summary(
         )
         
         execution_time = time.time() - start_time
-        log_job_complete(bound_logger, job_id, execution_time)
+        
+        # Extract usage metrics
+        usage = result.get("usage", {})
+        input_tokens = usage.get("input", 0)
+        output_tokens = usage.get("output", 0)
+        total_tokens = input_tokens + output_tokens
+        
+        log_job_complete(
+            bound_logger, 
+            job_id, 
+            execution_time, 
+            total_tokens=total_tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens
+        )
         
         return {
             "job_id": job_id,
@@ -283,9 +348,20 @@ def generate_comparison(
     
     try:
         # 1. Run Pipeline
+        # Create specialized filters for DRHP and RHP to match n8n logic
+        drhp_filter = {"type": "DRHP"}
+        if domain_id: drhp_filter["domainId"] = domain_id
+        if drhp_id: drhp_filter["documentId"] = drhp_id
+        
+        rhp_filter = {"type": "RHP"}
+        if domain_id: rhp_filter["domainId"] = domain_id
+        if rhp_id: rhp_filter["documentId"] = rhp_id
+        
         result = asyncio.run(comparison_pipeline.compare(
             drhp_namespace=drhp_namespace,
-            rhp_namespace=rhp_namespace
+            rhp_namespace=rhp_namespace,
+            drhp_filter=drhp_filter,
+            rhp_filter=rhp_filter
         ))
         
         if result["status"] == "success":

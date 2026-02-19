@@ -2,6 +2,7 @@
 Celery application configuration.
 Configures Celery with Redis backend and task autodiscovery.
 """
+import time
 from celery import Celery
 from celery.signals import task_prerun, task_postrun, task_failure
 from app.core.config import settings

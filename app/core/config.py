@@ -5,11 +5,18 @@ Supports sandbox, dev, and prod environments.
 import os
 from typing import Literal, Optional
 from functools import lru_cache
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore"
+    )
     
     # Environment
     APP_ENV: Literal["sandbox", "dev", "prod"] = "sandbox"
@@ -19,7 +26,7 @@ class Settings(BaseSettings):
     
     # API Settings
     API_HOST: str = "0.0.0.0"
-    API_PORT: int = 8000
+    API_PORT: int = 8001
     API_WORKERS: int = 4
     
     # Redis Configuration
@@ -57,11 +64,13 @@ class Settings(BaseSettings):
     
     # Pinecone
     PINECONE_API_KEY: str = ""
-    PINECONE_ENVIRONMENT: str = ""
-    PINECONE_DRHP_INDEX: str = "drhpdocuments"  # Fixed name
-    PINECONE_RHP_INDEX: str = "rhpdocuments"
-    PINECONE_DRHP_HOST: str = "https://drhpdocuments-w5m6qxe.svc.aped-4627-b74a.pinecone.io"
-    PINECONE_RHP_HOST: str = "https://rhpdocuments-w5m6qxe.svc.aped-4627-b74a.pinecone.io"
+    PINECONE_ENVIRONMENT: str = "us-east-1"
+    
+    # Single Index Configuration
+    PINECONE_DRHP_INDEX: str = "drhp-summarizer"
+    PINECONE_RHP_INDEX: str = "drhp-summarizer"
+    PINECONE_DRHP_HOST: str = "https://drhp-summarizer-y8firn8.svc.aped-4627-b74a.pinecone.io"
+    PINECONE_RHP_HOST: str = "https://drhp-summarizer-y8firn8.svc.aped-4627-b74a.pinecone.io"
     PERPLEXITY_API_KEY: Optional[str] = None
     COHERE_API_KEY: Optional[str] = None
     
@@ -73,10 +82,7 @@ class Settings(BaseSettings):
     SUMMARY_CREATE_URL: str = "http://localhost:5000/api/summaries/create"
     SUMMARY_STATUS_UPDATE_URL: str = "http://localhost:5000/api/summaries/summary-status/update"
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Auto-configure Redis URLs if not set

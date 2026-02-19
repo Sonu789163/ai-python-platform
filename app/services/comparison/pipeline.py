@@ -4,7 +4,7 @@ Orchestrates context retrieval from two separate indexes and generates compariso
 """
 import asyncio
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.services.vector_store import vector_store_service
@@ -28,7 +28,8 @@ class ComparisonPipeline:
         index_name: str, 
         host: str = "",
         vector_top_k: int = 50,
-        rerank_top_n: int = 15
+        rerank_top_n: int = 10,
+        metadata_filter: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Retrieves context from a specific Pinecone index.
@@ -41,46 +42,62 @@ class ComparisonPipeline:
                 query_vector = await self.embedding.embed_text(query)
                 index = vector_store_service.get_index(index_name, host=host)
                 
-                # Filter by documentName metadata
-                query_filter = {"documentName": namespace} if namespace and namespace != "" else None
+                # Construct Filter
+                # Default filter by documentName (namespace)
+                filter_criteria = {"documentName": namespace} if namespace and namespace != "" else {}
+                
+                # Merge with metadata_filter if provided via API (e.g. documentId, domainId)
+                if metadata_filter:
+                    filter_criteria.update(metadata_filter)
+                
+                # If criteria is empty, set to None to allow querying (though generally unsafe without namespace)
+                query_filter = filter_criteria if filter_criteria else None
 
-                # First try: Query the specified namespace with filter
+                logger.debug(f"Querying index {index_name}", namespace=namespace or "", filter=query_filter)
+
+                # First try: Query the default namespace ("") with filters
+                # This matches the single-index strategy where we rely on metadata for separation
+                safe_namespace = ""
+                
+                logger.debug(f"Querying index {index_name}", namespace=safe_namespace, filter=query_filter)
+                
                 search_res = index.query(
                     vector=query_vector,
                     top_k=vector_top_k,
-                    namespace=namespace or "",
+                    namespace=safe_namespace,
                     include_metadata=True,
                     filter=query_filter
                 )
                 initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
                 
-                # Fallback 1: Try "" namespace WITH metadata filter
+                # Fallback: Query specific namespace (legacy support or if still used)
                 if not initial_chunks and namespace and namespace != "":
-                    logger.info(f"Retrying search in \"\" namespace for {namespace}")
+                    # Remove "documentName" from filter for legacy namespace search
+                    # Legacy documents using namespace for isolation might NOT have documentName metadata
+                    legacy_filter = query_filter.copy() if query_filter else {}
+                    if "documentName" in legacy_filter:
+                        del legacy_filter["documentName"]
+                    if not legacy_filter:
+                        legacy_filter = None
+                        
+                    logger.warning(f"Fallback: Search in legacy namespace {namespace}")
                     search_res = index.query(
                         vector=query_vector,
                         top_k=vector_top_k,
-                        namespace="",
+                        namespace=namespace,
                         include_metadata=True,
-                        filter=query_filter
-                    )
-                    initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
-
-                # Fallback 2: Try "" namespace WITHOUT filter (last resort)
-                if not initial_chunks and namespace and namespace != "":
-                    logger.warning(f"Final fallback: UNFILTERED \"\" search for {namespace}")
-                    search_res = index.query(
-                        vector=query_vector,
-                        top_k=vector_top_k,
-                        namespace="",
-                        include_metadata=True
+                        filter=legacy_filter
                     )
                     initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
 
                 # 2. Rerank
                 if initial_chunks:
-                    reranked_chunks = rerank_service.rerank(query, initial_chunks, top_n=rerank_top_n)
-                    all_context.extend(reranked_chunks)
+                    try:
+                        reranked_chunks = rerank_service.rerank(query, initial_chunks, top_n=rerank_top_n)
+                        all_context.extend(reranked_chunks)
+                    except Exception as re:
+                        logger.error("Rerank failed, using initial chunks", error=str(re))
+                        all_context.extend(initial_chunks[:rerank_top_n])
             except Exception as e:
                 logger.error(f"Context retrieval failed for index {index_name}", query=query, error=str(e))
                 continue
@@ -102,25 +119,27 @@ class ComparisonPipeline:
         drhp_index: str = None,
         rhp_index: str = None,
         drhp_host: str = None,
-        rhp_host: str = None
+        rhp_host: str = None,
+        drhp_filter: Optional[Dict[str, Any]] = None,
+        rhp_filter: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Main comparison method.
         """
         drhp_index = drhp_index or settings.PINECONE_DRHP_INDEX
-        rhp_index = rhp_index or settings.PINECONE_RHP_INDEX
+        rhp_index = rhp_index or settings.PINECONE_DRHP_INDEX # Same index now
         drhp_host = drhp_host or settings.PINECONE_DRHP_HOST
-        rhp_host = rhp_host or settings.PINECONE_RHP_HOST
+        rhp_host = rhp_host or settings.PINECONE_DRHP_HOST # Same host now
         start_time = time.time()
         logger.info("Starting DRHP vs RHP Comparison Pipeline", 
                     drhp=drhp_namespace, rhp=rhp_namespace)
         
         # Parallel retrieval from both indexes
         drhp_task = self._retrieve_context_from_index(
-            COMPARISON_QUERIES, drhp_namespace, drhp_index, drhp_host
+            COMPARISON_QUERIES, drhp_namespace, drhp_index, drhp_host, metadata_filter=drhp_filter
         )
         rhp_task = self._retrieve_context_from_index(
-            COMPARISON_QUERIES, rhp_namespace, rhp_index, rhp_host
+            COMPARISON_QUERIES, rhp_namespace, rhp_index, rhp_host, metadata_filter=rhp_filter
         )
         
         drhp_context, rhp_context = await asyncio.gather(drhp_task, rhp_task)

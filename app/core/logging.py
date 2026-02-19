@@ -101,6 +101,9 @@ def log_job_complete(
     job_id: str,
     execution_time: float,
     status: str = "success",
+    total_tokens: Optional[int] = None,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
     **kwargs: Any
 ) -> None:
     """
@@ -111,15 +114,27 @@ def log_job_complete(
         job_id: Unique job identifier
         execution_time: Job execution time in seconds
         status: Job status (success/failed)
+        total_tokens: Total tokens used (optional)
+        input_tokens: Input tokens used (optional)
+        output_tokens: Output tokens used (optional)
         **kwargs: Additional context
     """
-    logger.info(
-        event="Job completed",
-        job_id=job_id,
-        execution_time=execution_time,
-        status=status,
+    log_data = {
+        "event": "Job completed",
+        "job_id": job_id,
+        "execution_time": execution_time,
+        "status": status,
         **kwargs
-    )
+    }
+    
+    if total_tokens is not None:
+        log_data["total_tokens"] = total_tokens
+    if input_tokens is not None:
+        log_data["input_tokens"] = input_tokens
+    if output_tokens is not None:
+        log_data["output_tokens"] = output_tokens
+        
+    logger.info(**log_data)
 
 
 def log_job_error(
