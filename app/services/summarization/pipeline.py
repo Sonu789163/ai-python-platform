@@ -18,6 +18,7 @@ from app.services.summarization.prompts import (
     CAPITAL_HISTORY_EXTRACTOR_SYSTEM_PROMPT,
     MAIN_SUMMARY_SYSTEM_PROMPT,
     MAIN_SUMMARY_INSTRUCTIONS,
+    DEFAULT_SUMMARY_FORMAT,
     SUMMARY_VALIDATOR_SYSTEM_PROMPT
 )
 from app.services.summarization.markdown_converter import MarkdownConverter
@@ -97,11 +98,9 @@ class SummaryPipeline:
                 if not initial_chunks and namespace and namespace != "":
                     # Remove "documentName" from filter for legacy namespace search
                     # Legacy documents using namespace for isolation might NOT have documentName metadata
-                    legacy_filter = query_filter.copy() if query_filter else {}
-                    if "documentName" in legacy_filter:
-                        del legacy_filter["documentName"]
-                    if not legacy_filter:
-                        legacy_filter = None
+                    # Create filtered copy without "documentName"
+                    legacy_filter_dict = {k: v for k, v in (query_filter or {}).items() if k != "documentName"}
+                    legacy_filter: Optional[Dict[str, Any]] = legacy_filter_dict if legacy_filter_dict else None
                         
                     # logger.info(f"Fallback search in legacy namespace {namespace} with filter {legacy_filter}")
                     search_res = index.query(
@@ -257,6 +256,7 @@ class SummaryPipeline:
         self,
         namespace: str,
         custom_sop: Optional[str] = None,
+        custom_subqueries: Optional[List[str]] = None,
         index_name: str = None,
         host: str = None,
         metadata_filter: Optional[Dict[str, Any]] = None
@@ -272,9 +272,13 @@ class SummaryPipeline:
         total_input_tokens = 0
         total_output_tokens = 0
         
+        # Resolve subqueries: use custom if provided, else fall back to defaults
+        active_subqueries = custom_subqueries if custom_subqueries else SUBQUERIES
+        logger.info(f"Agent 3: Using {len(active_subqueries)} subqueries (custom={bool(custom_subqueries)})")
+        
         # Iterate through each subquery to generate focused sections
         # This addresses the issue of missing fields by ensuring each topic gets dedicated context and generation
-        for i, query in enumerate(SUBQUERIES):
+        for i, query in enumerate(active_subqueries):
             try:
                 # Retrieve context specific to this subquery
                 # We use a focused retrieval (top_k=20) to ensure we get deep details for this specific section
@@ -338,7 +342,8 @@ class SummaryPipeline:
                 
             except Exception as e:
                 logger.error(f"Agent 3: Failed to generate part {i+1}", error=str(e))
-                # Continue to next part instead of failing completely
+                # Append error placeholder so structure remains
+                full_summary_parts.append(f"## SECTION {i+1} [GENERATION FAILED]\n\n*System Error: Failed to generate this section. Details: {str(e)}*")
                 continue
         
         if not full_summary_parts:
@@ -366,6 +371,7 @@ class SummaryPipeline:
         namespace: str,
         custom_validator_prompt: Optional[str] = None,
         formatting_sop: Optional[str] = None,
+        custom_subqueries: Optional[List[str]] = None,
         index_name: str = None,
         host: str = None,
         metadata_filter: Optional[Dict[str, Any]] = None
@@ -378,9 +384,10 @@ class SummaryPipeline:
         """
         logger.info("Agent 4: Summary Validator - Starting", namespace=namespace)
         
-        # Retrieve context for validation (same as Agent 3)
+        # Retrieve context for validation using same subqueries as Agent 3
+        active_subqueries = custom_subqueries if custom_subqueries else SUBQUERIES
         context = await self._retrieve_context(
-            SUBQUERIES,
+            active_subqueries,
             namespace,
             index_name,
             host,
@@ -486,20 +493,45 @@ class SummaryPipeline:
         investor_match_enabled = tenant_config.get("investor_match_only", True)
         valuation_enabled = tenant_config.get("valuation_matching", True)
         adverse_enabled = tenant_config.get("adverse_finding", True)
-        custom_sop = tenant_config.get("custom_summary_sop", "")
-        custom_validator = tenant_config.get("custom_validator_prompt", "")
         target_investors = tenant_config.get("target_investors", [])
+        
+        # ── Dynamic Prompt Resolution ──
+        # Priority: custom tenant config > hard-coded defaults
+        # Agent 3 prompt: agent3_prompt (from onboarding) -> custom_summary_sop (legacy) -> default
+        custom_sop = (
+            tenant_config.get("agent3_prompt")
+            or tenant_config.get("custom_summary_sop")
+            or ""
+        )
+        
+        # Agent 4 prompt: agent4_prompt (from onboarding) -> custom_validator_prompt (legacy) -> default
+        custom_validator = (
+            tenant_config.get("agent4_prompt")
+            or tenant_config.get("custom_validator_prompt")
+            or ""
+        )
+        
+        # Subqueries: custom_subqueries (from onboarding) -> default SUBQUERIES
+        custom_subqueries = tenant_config.get("custom_subqueries", []) or []
+        # Validate: must be a non-empty list of strings
+        if custom_subqueries and isinstance(custom_subqueries, list) and len(custom_subqueries) > 0:
+            custom_subqueries = [sq for sq in custom_subqueries if isinstance(sq, str) and sq.strip()]
+        else:
+            custom_subqueries = None  # Will fall back to default SUBQUERIES in agents
         
         # Ensure strict override for custom SOP, handling potential empty strings or whitespace
         if custom_sop and not custom_sop.strip():
              custom_sop = None
+        if custom_validator and not custom_validator.strip():
+             custom_validator = None
 
-        logger.info("Tenant toggles", 
+        logger.info("Tenant config resolved", 
                     investor_match=investor_match_enabled,
                     valuation=valuation_enabled,
                     adverse=adverse_enabled,
                     has_custom_sop=bool(custom_sop),
-                    has_custom_validator=bool(custom_validator))
+                    has_custom_validator=bool(custom_validator),
+                    custom_subqueries_count=len(custom_subqueries) if custom_subqueries else 0)
         
         try:
             # PHASE 1: Parallel Data Extraction
@@ -507,7 +539,7 @@ class SummaryPipeline:
             
             agent_1_task = self._agent_1_investor_extractor(namespace, index_name, host, metadata_filter)
             agent_2_task = self._agent_2_capital_history_extractor(namespace, index_name, host, metadata_filter)
-            agent_3_task = self._agent_3_summary_generator(namespace, custom_sop, index_name, host, metadata_filter)
+            agent_3_task = self._agent_3_summary_generator(namespace, custom_sop, custom_subqueries, index_name, host, metadata_filter)
             
             # Run agents 1, 2, 3 in parallel
             investor_json, capital_json, draft_summary_result = await asyncio.gather(
@@ -557,6 +589,7 @@ class SummaryPipeline:
                 namespace, 
                 custom_validator, 
                 formatting_sop=validation_sop, # Pass the reference SOP
+                custom_subqueries=custom_subqueries, # Same subqueries for consistent coverage
                 index_name=index_name, 
                 host=host, 
                 metadata_filter=metadata_filter
