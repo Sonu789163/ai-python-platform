@@ -32,88 +32,82 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 SUBQUERY_REFACTOR_SYSTEM_PROMPT = """
-You are an expert AI systems analyst specializing in financial document analysis pipelines.
+# ROLE: Senior Financial Systems Architect & Prompt Engineer
+You are an expert at optimizing RAG (Retrieval-Augmented Generation) pipelines for Institutional Finance.
 
-Your task is to analyze a tenant's Standard Operating Procedure (SOP) document and compare it against a set of DEFAULT SUBQUERIES used for retrieving information from DRHP/RHP documents stored in a vector database.
+# TASK: 
+Analyze a tenant's Standard Operating Procedure (SOP) and perform a high-precision refactoring of the DEFAULT SUBQUERIES. 
+Your goal is to align the retrieval logic with the tenant's specific terminology and data extraction priorities.
 
-## DEFAULT SUBQUERIES (Base Template):
+## DEFAULT SUBQUERIES (Base Context):
 {default_subqueries}
 
-## RULES:
-1. The 10 default subqueries form the BASE template. They must NOT be removed unless the SOP explicitly excludes a topic.
-2. Each default subquery can be REWORDED to better align with the SOP's terminology and focus areas.
-3. NEW subqueries can be ADDED if the SOP demands coverage of topics not addressed by existing subqueries.
-4. Identify any domain-specific terminology from the SOP that should be incorporated into the subqueries.
-5. Ensure the subqueries cover ALL extraction areas mentioned in the SOP.
+# CONSTRAINTS & LOGIC:
+1. **FIXED COUNT**: You MUST return exactly 10 subqueries. If the SOP is brief, rephrase or merge default queries to maintain this count.
+2. **TERMINOLOGY ALIGNMENT**: Replace generic terms (e.g., "Company") with tenant-specific terms found in the SOP.
+3. **PRIORITIZATION**: If the SOP emphasizes certain metrics (e.g., EBITDA, ROE), adjust the corresponding subqueries to be more specific.
+4. **NO DELETIONS**: Every extraction area in the default list must remain represented, even if reworded.
+5. **ADDITIONS**: If the SOP demands a unique data point not covered by defaults, replace the least relevant default subquery with the new requirement.
 
-## OUTPUT FORMAT:
-Return a JSON object with this exact structure:
+# OUTPUT JSON STRUCTURE:
+Return ONLY valid JSON:
 {{
     "analysis": {{
-        "missing_areas": ["List of topics in SOP not covered by default subqueries"],
-        "additional_expectations": ["List of extra data points the SOP requires"],
-        "domain_terminology": ["List of domain-specific terms found in SOP"]
+        "sop_focus": "Primary objective of the tenant SOP",
+        "terminology_changes": ["List of replaced terms"],
+        "new_requirements": ["Unique data points from SOP"]
     }},
     "subqueries": [
-        "Subquery 1 text (modified or original)",
-        "Subquery 2 text (modified or original)",
+        "Subquery 1 (Must be 10 total)",
         ...
-        "Any additional subqueries"
     ],
-    "changes_log": [
-        "Description of each change made and why"
-    ]
+    "changes_log": ["Surgical explanation of each modification"]
 }}
-
-IMPORTANT: Return ONLY valid JSON. No markdown formatting, no code blocks.
 """
 
 AGENT3_PROMPT_CUSTOMIZATION_SYSTEM_PROMPT = """
-You are an expert AI prompt engineer specializing in financial document summarization systems.
+# ROLE: Lead AI Prompt Engineer (Fintech Summarization)
+You specialize in modifying "Summarization System Prompts" using a Minimalist Modification Strategy.
 
-Your task is to customize the SUMMARIZATION AGENT's system prompt based on a tenant's Standard Operating Procedure (SOP).
+# OBJECTIVE:
+Inject tenant-specific SOP requirements into the BASE SUMMARIZATION PROMPT while preserving 100% of its core logic, accuracy constraints, and professional tone.
 
-## BASE SUMMARIZATION PROMPT:
+## BASE SYSTEM PROMPT:
 {base_prompt}
 
-## CUSTOMIZATION RULES:
-1. Preserve the core summarization capabilities and accuracy requirements.
-2. Modify the section structure to match the SOP's required headings and hierarchy.
-3. Adjust data ordering to match SOP requirements.
-4. Include any mandatory disclosures specified by the SOP.
-5. Adapt the tone and language to match the SOP's domain language.
-6. Ensure all SOP-specified data points are explicitly requested in the prompt.
-7. Maintain all table formats but adjust columns/rows per SOP requirements.
-8. Keep the critical accuracy rules (zero fabrication, exact transcription, etc.)
+# CUSTOMIZATION HIERARCHY (Order of Priority):
+1. **Section Structure**: Reorder, add, or rename headers ONLY IF explicitly required by the SOP.
+2. **Formatting Specs**: Adjust tables, column headers, or bullet styles if the SOP mandates a different reporting structure.
+3. **Extraction Rules**: Add specific rules for how certain numbers must be handled (e.g., "Round to 2 decimals" or "Use Million instead of Crore").
+4. **Mandatory Disclosures**: Append any required legalese or standard text the SOP specifies for every summary.
 
-## OUTPUT:
-Return ONLY the complete, customized system prompt text. No explanations, no markdown code blocks.
-The output must be a ready-to-use system prompt for the summarization agent.
+# CRITICAL RULES (DO NOT CHANGE):
+- DO NOT remove "Zero Fabrication" or "Exact Transcription" rules.
+- DO NOT change the "Audit Link" or "Contextual Reference" logic.
+- Keep the prompt concise; only make changes that are functionally necessary based on the SOP.
+
+# OUTPUT:
+Return the complete, ready-to-use customized system prompt string. No markdown code blocks. No preamble.
 """
 
 AGENT4_PROMPT_CUSTOMIZATION_SYSTEM_PROMPT = """
-You are an expert AI prompt engineer specializing in financial document validation systems.
+# ROLE: Senior Quality Assurance & Prompt Engineer (Validation Systems)
+Your specialty is designing high-precision "Validation Agent" prompts for financial compliance.
 
-Your task is to customize the VALIDATION AGENT's system prompt based on a tenant's Standard Operating Procedure (SOP).
+# OBJECTIVE:
+Customize the VALIDATOR AGENT system prompt to enforce the specific rules, checklists, and quality standards defined in the tenant's SOP.
 
-## BASE VALIDATION PROMPT:
+## BASE VALIDATOR PROMPT:
 {base_prompt}
 
-## CUSTOMIZATION RULES:
-1. Retain the core identity and strict validation rules (accuracy, verification, zero fabrication).
-2. Replace generic format checks with SPECIFIC checks for the sections defined in the SOP.
-3. Ensure the validator checks for EVERY section, table, and data point explicitly mentioned in the SOP.
-4. Add SOP-driven validation changes such as:
-   - Mandatory financial tables checks
-   - Investor disclosure verification
-   - Risk factor completeness checks
-   - Regulatory formatting requirements
-5. Maintain the systematic validation workflow (audit → cross-verification → compliance → missing data → reconstruction → QA).
-6. Update the section checklists to match the customized section structure.
+# CUSTOMIZATION LOGIC:
+1. **Checklist Synthesis**: Extract every specific requirement, data point, and formatting rule from the SOP and convert them into the "Checklist" section of the prompt.
+2. **Compliance Rules**: If the SOP mentions regulatory standards, ensure the validator specifically checks for these.
+3. **Structure Match**: The validator's logic must perfectly mirror the section structure of the customized Agent 3 prompt (from Task 2).
+4. **Minimalism**: Maintain the existing systematic validation workflow (Audit → Cross-verification → QA). Only update the "what" is being checked, not the "how" it is checked.
 
-## OUTPUT:
-Return ONLY the complete, customized system prompt text. No explanations, no markdown code blocks.
-The output must be a ready-to-use system prompt for the validation agent.
+# OUTPUT:
+Return only the full customized validation prompt text. No explanation, no wrapper.
 """
 
 
@@ -404,11 +398,9 @@ class OnboardingAgent:
             logger.info("No SOP provided. Storing toggles only, using default pipeline.")
             update_data = {
                 "sop_text": "",
-                "custom_summary_sop": "",
                 "custom_subqueries": [],
                 "agent3_prompt": "",
                 "agent4_prompt": "",
-                "custom_validator_prompt": "",
                 "onboarding_status": "completed_no_sop",
                 "last_onboarded": datetime.now(timezone.utc).isoformat(),
                 "investor_match_only": toggles.get("investor_match_only", False),
@@ -438,19 +430,17 @@ class OnboardingAgent:
         update_data = {
             # SOP Storage
             "sop_text": custom_sop_input,        # Original uploaded SOP text
-            "custom_summary_sop": final_sop_text, # Structured/processed SOP
 
             # Task 1 output
             "custom_subqueries": custom_subqueries,
             "subquery_analysis": subquery_result.get("analysis", {}),
             "subquery_changes_log": subquery_result.get("changes_log", []),
 
-            # Task 2 output
+            # Task 2 output: Agent 3 prompt (Summarization Agent)
             "agent3_prompt": agent3_prompt,
 
-            # Task 3 output  
+            # Task 3 output: Agent 4 prompt (Validation Agent)
             "agent4_prompt": agent4_prompt,
-            "custom_validator_prompt": agent4_prompt,  # backward compat field
 
             # Toggles
             "investor_match_only": toggles.get("investor_match_only", False),
@@ -484,11 +474,19 @@ class OnboardingAgent:
     # ─────────────────────────────────────────────
 
     def _save_to_mongodb(self, domain_id: str, update_data: Dict[str, Any]) -> bool:
-        """Saves onboarding configuration to MongoDB (upsert)."""
+        """Saves onboarding configuration to MongoDB (upsert).
+        Also removes stale/duplicate fields that should not exist."""
         try:
             result = self.collection.update_one(
                 {"domainId": domain_id},
-                {"$set": update_data},
+                {
+                    "$set": update_data,
+                    # Remove stale duplicate fields (cleanup)
+                    "$unset": {
+                        "custom_summary_sop": "",
+                        "custom_validator_prompt": "",
+                    },
+                },
                 upsert=True,
             )
             logger.info(

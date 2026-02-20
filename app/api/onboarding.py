@@ -1,9 +1,10 @@
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form
-from pydantic import BaseModel, Json
+from pydantic import BaseModel
 from typing import Optional, Dict, List
 from app.services.onboarding.agent import onboard_tenant, OnboardingAgent
 import logging
+import json
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -18,29 +19,30 @@ class OnboardingConfig(BaseModel):
 @router.post("/setup")
 async def setup_tenant(
     domainId: str = Form(...),
-    config: Json[OnboardingConfig] = Form(...),
+    config: str = Form(...),
     file: Optional[UploadFile] = File(None),
+    sopText: Optional[str] = Form(None), # Accepts raw text from Admin Settings
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
     Trigger the Onboarding Agent to setup tenant configuration.
     
     This endpoint handles both initial onboarding and re-onboarding.
-    When called with a new SOP file, the onboarding agent will:
-      1. Parse and analyze the SOP
-      2. Refactor subqueries (Task 1)
-      3. Customize Agent 3 prompt (Task 2)
-      4. Customize Agent 4 prompt (Task 3)
-      5. Store all configs in MongoDB
-    
-    Accepts optional file (PDF/DOCX) for SOP analysis.
+    It can take a file or raw text (sopText).
     """
     logger.info(f"Received onboarding request for {domainId}")
     
+    # Parse the config JSON string manually
+    try:
+        config_data = OnboardingConfig(**json.loads(config))
+    except (json.JSONDecodeError, Exception) as e:
+        logger.error(f"Failed to parse config JSON: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid config JSON: {str(e)}")
+    
     # Merge targetInvestors into toggles
-    toggles = config.toggles.copy()
-    if config.targetInvestors:
-        toggles["target_investors"] = config.targetInvestors
+    toggles = config_data.toggles.copy() if config_data.toggles else {}
+    if config_data.targetInvestors:
+        toggles["target_investors"] = config_data.targetInvestors
     
     custom_sop_input = ""
     is_raw_text = False
@@ -54,8 +56,11 @@ async def setup_tenant(
         if extracted_text:
             custom_sop_input = extracted_text
             is_raw_text = True
-        else:
-            logger.warning("Failed to extract text from uploaded file")
+    elif sopText:
+        # If no file but raw text provided, use it
+        logger.info(f"Using raw SOP text provided in form for {domainId}")
+        custom_sop_input = sopText
+        is_raw_text = True
 
     # Run in background (onboarding can take 30-60s due to LLM calls)
     background_tasks.add_task(
@@ -82,8 +87,9 @@ async def setup_tenant(
 @router.post("/re-onboard")
 async def re_onboard_tenant(
     domainId: str = Form(...),
-    config: Json[OnboardingConfig] = Form(...),
+    config: str = Form(...),
     file: Optional[UploadFile] = File(None),
+    sopText: Optional[str] = Form(None),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
@@ -98,15 +104,22 @@ async def re_onboard_tenant(
     """
     logger.info(f"Received RE-onboarding request for {domainId}")
     
+    # Parse the config JSON string manually
+    try:
+        config_data = OnboardingConfig(**json.loads(config))
+    except (json.JSONDecodeError, Exception) as e:
+        logger.error(f"Failed to parse config JSON: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid config JSON: {str(e)}")
+    
     # Merge targetInvestors into toggles
-    toggles = config.toggles.copy()
-    if config.targetInvestors:
-        toggles["target_investors"] = config.targetInvestors
+    toggles = config_data.toggles.copy() if config_data.toggles else {}
+    if config_data.targetInvestors:
+        toggles["target_investors"] = config_data.targetInvestors
     
     custom_sop_input = ""
     is_raw_text = False
     
-    # File is required for re-onboarding (must provide updated SOP)
+    # Process File or Raw Text
     if file:
         logger.info(f"Processing updated SOP file: {file.filename}")
         content = await file.read()
@@ -120,6 +133,10 @@ async def re_onboard_tenant(
                 status_code=400,
                 detail="Failed to extract text from uploaded SOP file"
             )
+    elif sopText:
+        logger.info(f"Using raw SOP text provided in form for {domainId}")
+        custom_sop_input = sopText
+        is_raw_text = True
     else:
         raise HTTPException(
             status_code=400,
