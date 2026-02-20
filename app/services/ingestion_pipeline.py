@@ -51,9 +51,19 @@ class IngestionPipeline:
             text = extraction_result["text"]
             
             # 3. Chunk
+            chunk_metadata = {
+                "source": file_url,
+                "job_id": job_id,
+                "documentName": filename,
+                "documentId": metadata.get("documentId", ""),
+                "domain": metadata.get("domain", ""),
+                "domainId": metadata.get("domainId", ""),
+                "type": doc_type.upper() if doc_type else "DRHP"
+            }
+            
             chunks = self.chunking.chunk_with_metadata(
                 text,
-                metadata={"source": file_url, "doc_type": doc_type, "job_id": job_id}
+                metadata=chunk_metadata
             )
             
             if not chunks:
@@ -63,13 +73,10 @@ class IngestionPipeline:
             # 4. Embed
             chunks_with_embeddings = await self.embedding.embed_chunks(chunks)
             
-            # 5. Store in Pinecone
-            if doc_type == "rhp":
-                index_name = settings.PINECONE_RHP_INDEX
-                host = settings.PINECONE_RHP_HOST
-            else:
-                index_name = settings.PINECONE_DRHP_INDEX
-                host = settings.PINECONE_DRHP_HOST
+            # 5. Store in Pinecone (Unified Index)
+            # Both DRHP and RHP are stored in the same index: drhp-summarizer
+            index_name = settings.PINECONE_DRHP_INDEX
+            host = settings.PINECONE_DRHP_HOST
                 
             pinecone_res = vector_store_service.upsert_chunks(
                 chunks=chunks_with_embeddings,

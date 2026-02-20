@@ -25,8 +25,9 @@ class ChatService:
         namespace: str, 
         index_name: str, 
         host: str = "",
-        top_k: int = 15,
-        rerank_n: int = 8
+        top_k: int = 10,
+        rerank_n: int = 5,
+        metadata_filter: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Retrieves context with fallback logic.
@@ -36,33 +37,51 @@ class ChatService:
             query_vector = await self.embedding.embed_text(query)
             index = vector_store_service.get_index(index_name, host=host)
             
-            # Filter by documentName metadata
-            query_filter = {"documentName": namespace} if namespace and namespace != "" else None
+            # Construct Filter
+            # Default filter by documentName (namespace)
+            filter_criteria = {"documentName": namespace} if namespace and namespace != "" else {}
+            
+            # Merge with metadata_filter if provided via API (e.g. documentId, domainId)
+            if metadata_filter:
+                filter_criteria.update(metadata_filter)
+            
+            # If criteria is empty, set to None to allow querying (though generally unsafe without namespace)
+            query_filter = filter_criteria if filter_criteria else None
 
-            # First try: Specified namespace
+            # First try: Default namespace ("") with filters
+            # This matches the single-index strategy where we rely on metadata for separation
             search_res = index.query(
                 vector=query_vector,
                 top_k=top_k,
-                namespace=namespace,
+                namespace="",
                 include_metadata=True,
                 filter=query_filter
             )
             initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
             
-            # Fallback 1: "" namespace WITH filter
+            # Fallback 1: Specified namespace (legacy support)
             if not initial_chunks and namespace and namespace != "":
-                logger.info(f"Chat retry in \"\" namespace for {namespace}")
+                # Remove "documentName" from filter for legacy namespace search
+                # Legacy documents using namespace for isolation might NOT have documentName metadata
+                legacy_filter = query_filter.copy() if query_filter else {}
+                if "documentName" in legacy_filter:
+                    del legacy_filter["documentName"]
+                if not legacy_filter:
+                    legacy_filter = None
+                
+                # logger.info(f"Chat retry in legacy namespace {namespace}")
                 search_res = index.query(
                     vector=query_vector,
                     top_k=top_k,
-                    namespace="",
+                    namespace=namespace,
                     include_metadata=True,
-                    filter=query_filter
+                    filter=legacy_filter
                 )
                 initial_chunks = [m['metadata']['text'] for m in search_res['matches']]
 
             # Fallback 2: "" namespace WITHOUT filter
-            if not initial_chunks and namespace and namespace != "":
+            # Skip if strict isolation is enforced via metadata_filter
+            if not initial_chunks and not metadata_filter and namespace and namespace != "":
                 logger.warning(f"Chat final fallback in \"\" for {namespace}")
                 search_res = index.query(
                     vector=query_vector,
@@ -88,7 +107,8 @@ class ChatService:
         message: str, 
         namespace: str, 
         document_type: str, # 'DRHP' or 'RHP'
-        history: List[Dict[str, str]] = None
+        history: List[Dict[str, str]] = None,
+        metadata_filter: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Main chat execution.
@@ -96,17 +116,20 @@ class ChatService:
         start_time = time.time()
         
         # Decide index based on document type
-        if document_type.upper() == "DRHP":
-            index_name = settings.PINECONE_DRHP_INDEX
-            host = settings.PINECONE_DRHP_HOST
-        else:
-            index_name = settings.PINECONE_RHP_INDEX
-            host = settings.PINECONE_RHP_HOST
+        # Use consolidated index for both types
+        index_name = settings.PINECONE_DRHP_INDEX
+        host = settings.PINECONE_DRHP_HOST
 
         logger.info("Chat query received", message=message, doc_type=document_type, namespace=namespace)
 
         # 1. Retrieve Context
-        context = await self._retrieve_context(message, namespace, index_name, host=host)
+        context = await self._retrieve_context(
+            message, 
+            namespace, 
+            index_name, 
+            host=host, 
+            metadata_filter=metadata_filter
+        )
         
         # 2. Prepare Messages
         messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]

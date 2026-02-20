@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.mongo import mongodb
-from app.api import jobs, chat
+from app.api import jobs, chat, onboarding
 
 logger = get_logger(__name__)
 
@@ -83,6 +83,7 @@ async def health_check():
 # Include routers
 app.include_router(jobs.router)
 app.include_router(chat.router)
+app.include_router(onboarding.router, prefix="/onboarding", tags=["Onboarding"])
 
 
 # Root endpoint
