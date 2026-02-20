@@ -19,6 +19,8 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="The user's question")
     namespace: str = Field(..., description="The document filename/namespace")
     document_type: str = Field(..., description="DRHP or RHP")
+    documentId: Optional[str] = None
+    domainId: Optional[str] = None
     history: Optional[List[Dict[str, str]]] = Field(default=None, description="Previous chat history")
     authorization: Optional[str] = None
 
@@ -38,12 +40,20 @@ async def chat_query(request: ChatRequest, req: Request):
     logger.info("Executing real-time chat", job_id=job_id, namespace=request.namespace)
     
     try:
+        # Build Metadata Filter for Tenant Isolation
+        metadata_filter = {}
+        if request.domainId:
+            metadata_filter["domainId"] = request.domainId
+        if request.documentId:
+            metadata_filter["documentId"] = request.documentId
+            
         # 1. Execute Chat
         result = await chat_service.chat(
             message=request.message,
             namespace=request.namespace,
             document_type=request.document_type,
-            history=request.history
+            history=request.history,
+            metadata_filter=metadata_filter if metadata_filter else None
         )
         
         if result["status"] == "error":

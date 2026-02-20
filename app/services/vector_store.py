@@ -60,10 +60,15 @@ class VectorStoreService:
         vectors = []
         for chunk in chunks:
             # Metadata as stored in n8n workflow
+            chunk_metadata = chunk.get("metadata", {})
             metadata = {
                 "text": chunk["chunk_text"],
                 "chunk_index": chunk["chunk_index"],
-                "documentName": namespace
+                "documentName": namespace,
+                "documentId": chunk_metadata.get("documentId", ""),
+                "domain": chunk_metadata.get("domain", ""),
+                "domainId": chunk_metadata.get("domainId", ""),
+                "type": chunk_metadata.get("type", "DRHP")
             }
             # Merge extra metadata if any
             if "metadata" in chunk:
@@ -85,17 +90,27 @@ class VectorStoreService:
             vector_count=len(vectors)
         )
         
-        # Pinecone upsert in batches
-        # Ensure namespace is not "__default__" which is forbidden in newer API versions
-        safe_namespace = "" if namespace == "__default__" or not namespace else namespace
+        # Pinecone upsert in batches (Limit to 50 vectors per request to avoid size limits)
+        batch_size = 50
+        # ALWAYS use default namespace for single-index strategy, rely on metadata for separation
+        safe_namespace = "" 
         
-        upsert_response = index.upsert(
-            vectors=vectors,
-            namespace=safe_namespace
-        )
+        total_upserted = 0
+        for i in range(0, len(vectors), batch_size):
+            batch = vectors[i:i + batch_size]
+            try:
+                upsert_response = index.upsert(
+                    vectors=batch,
+                    namespace=safe_namespace
+                )
+                upserted = getattr(upsert_response, "upserted_count", len(batch))
+                total_upserted += upserted
+                logger.debug(f"Upserted batch {i//batch_size + 1}", count=upserted)
+            except Exception as e:
+                logger.error(f"Failed to upsert batch {i}", error=str(e))
+                raise
         
-        # In newer SDK, upsert_response is an object with .upserted_count
-        count = getattr(upsert_response, "upserted_count", 0)
+        count = total_upserted
         
         logger.info(
             "Pinecone upsert completed",
@@ -109,6 +124,33 @@ class VectorStoreService:
             "namespace": namespace,
             "index": index_name
         }
+
+    def delete_vectors(self, index_name: str, namespace: str, host: str = ""):
+        """
+        Delete all vectors in a namespace.
+        """
+        index = self.get_index(index_name, host=host)
+        
+        logger.info(
+            "Deleting vectors from Pinecone",
+            index=index_name,
+            namespace=namespace
+        )
+        
+        try:
+            # Delete vectors using metadata filter on default namespace
+            # Pinecone requires namespace="" for default
+            response = index.delete(
+                namespace="",
+                filter={"documentName": namespace}
+            )
+            
+            logger.info("Deletion request sent (filtered by documentName)", index=index_name, namespace=namespace)
+            return response
+            
+        except Exception as e:
+            logger.error("Failed to delete vectors", index=index_name, namespace=namespace, error=str(e))
+            raise
 
 
 # Global service instance

@@ -33,6 +33,9 @@ class SummaryJobRequest(BaseModel):
     """Summary generation job request."""
     namespace: str = Field(..., description="The filename/namespace in Pinecone to summarize")
     doc_type: str = Field(default="drhp", description="Type of document (drhp or rhp)")
+    authorization: Optional[str] = None
+    documentId: Optional[str] = None
+    domainId: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata")
 
 
@@ -98,6 +101,33 @@ async def submit_document_job(request: DocumentJobRequest):
         )
 
 
+@router.delete("/document", status_code=status.HTTP_200_OK)
+async def delete_document_vectors(
+    namespace: str,
+    doc_type: str = "drhp"
+):
+    """
+    Delete document vectors from Pinecone.
+    """
+    try:
+        from app.core.config import settings
+        from app.services.vector_store import vector_store_service
+        
+        # Determine Pinecone Index (Single Index Strategy)
+        index_name = settings.PINECONE_DRHP_INDEX
+        host = settings.PINECONE_DRHP_HOST
+            
+        vector_store_service.delete_vectors(index_name, namespace, host=host)
+        
+        return {
+            "status": "success",
+            "message": f"Vectors for {namespace} deleted from {index_name}"
+        }
+    except Exception as e:
+        logger.error("Failed to delete vectors", error=str(e), namespace=namespace)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/news", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
 async def submit_news_job(request: NewsJobRequest) -> JobResponse:
     """
@@ -146,6 +176,21 @@ async def submit_summary_job(request: SummaryJobRequest) -> JobResponse:
     try:
         job_id = str(uuid.uuid4())
         
+        # Prepare metadata - prioritize top-level fields but fallback to nested metadata
+        task_metadata = request.metadata or {}
+        
+        # Ensure critical fields for BackendNotifier are present 
+        # (Node.js backend often nests these in 'metadata' object)
+        final_auth = request.authorization or task_metadata.get("authorization")
+        final_doc_id = request.documentId or task_metadata.get("documentId")
+        final_domain_id = request.domainId or task_metadata.get("domainId")
+        
+        task_metadata.update({
+            "authorization": final_auth,
+            "documentId": final_doc_id,
+            "domainId": final_domain_id
+        })
+        
         logger.info(
             "Summary job submitted",
             job_id=job_id,
@@ -155,7 +200,7 @@ async def submit_summary_job(request: SummaryJobRequest) -> JobResponse:
         
         celery_app.send_task(
             "generate_summary",
-            args=[request.namespace, request.doc_type, job_id, request.metadata],
+            args=[request.namespace, request.doc_type, job_id, task_metadata],
             task_id=job_id
         )
         
@@ -183,13 +228,17 @@ async def submit_comparison_job(request: ComparisonJobRequest) -> JobResponse:
         
         # Prepare metadata for worker
         worker_metadata = request.metadata or {}
+        
+        final_auth = request.authorization or worker_metadata.get("authorization")
+        final_domain_id = request.domainId or worker_metadata.get("domainId")
+        
         worker_metadata.update({
-            "authorization": request.authorization,
+            "authorization": final_auth,
             "sessionId": request.sessionId,
             "drhpDocumentId": request.drhpDocumentId,
             "rhpDocumentId": request.rhpDocumentId,
             "domain": request.domain,
-            "domainId": request.domainId
+            "domainId": final_domain_id
         })
         
         logger.info(

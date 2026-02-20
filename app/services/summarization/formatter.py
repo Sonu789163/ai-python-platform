@@ -196,10 +196,104 @@ class HTMLFormatter:
             """
         return html
 
+    def generate_investor_report_html(self, extracted_investors: List[dict], matched_investors: List[dict] = None, show_matches: bool = True) -> str:
+        """
+        Generates HTML for Investor Analysis (Section A and optionally B).
+        Matches n8n logic.
+        """
+        def round_pct(s):
+            if not s: return "0%"
+            try:
+                val = float(str(s).replace('%', ''))
+                return f"{val:.2f}%"
+            except: return s
+
+        # Section A: All Investors
+        rows_a = ""
+        for i, inv in enumerate(extracted_investors):
+            bg = "#f9f9f9" if i % 2 == 0 else "#ffffff"
+            rows_a += f"""
+            <tr style='background-color: {bg};'>
+                <td style='padding: 10px; border: 1px solid #ddd;'>{inv.get('investor_name', 'N/A')}</td>
+                <td style='padding: 10px; border: 1px solid #ddd; text-align: right;'>{str(inv.get('number_of_equity_shares', 0))}</td>
+                <td style='padding: 10px; border: 1px solid #ddd; text-align: right;'>{round_pct(inv.get('percentage_of_pre_issue_capital', '0%'))}</td>
+                <td style='padding: 10px; border: 1px solid #ddd;'>{inv.get('investor_category', 'N/A')}</td>
+            </tr>"""
+
+        section_a = f"""
+        <h3>SECTION A: COMPLETE INVESTOR LIST FROM DRHP</h3>
+        <table border='1' cellpadding='10' cellspacing='0' style='border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 13px;'>
+            <thead style='background-color: #4472C4; color: white;'>
+                <tr>
+                    <th style='text-align: left; padding: 12px; border: 1px solid #333;'>Investor Name</th>
+                    <th style='text-align: right; padding: 12px; border: 1px solid #333;'>Shares</th>
+                    <th style='text-align: right; padding: 12px; border: 1px solid #333;'>% Pre-Issue</th>
+                    <th style='text-align: left; padding: 12px; border: 1px solid #333;'>Category</th>
+                </tr>
+            </thead>
+            <tbody>{rows_a if rows_a else "<tr><td colspan='4'>No investors found</td></tr>"}</tbody>
+        </table>"""
+
+        if not show_matches:
+            return f"<div class='investor-report'>{section_a}</div>"
+
+        # Section B: Matched Investors
+        rows_b = ""
+        if matched_investors:
+            for i, inv in enumerate(matched_investors):
+                bg = "#f0f8f0" if i % 2 == 0 else "#ffffff"
+                rows_b += f"""
+                <tr style='background-color: {bg};'>
+                    <td style='padding: 10px; border: 1px solid #ddd;'>{inv.get('investor_name', 'N/A')}</td>
+                    <td style='padding: 10px; border: 1px solid #ddd; text-align: right;'>{str(inv.get('number_of_equity_shares', 0))}</td>
+                    <td style='padding: 10px; border: 1px solid #ddd; text-align: right;'>{round_pct(inv.get('percentage_of_pre_issue_capital', inv.get('percentage_of_capital', '0%')))}</td>
+                    <td style='padding: 10px; border: 1px solid #ddd;'>{inv.get('investor_category', 'N/A')}</td>
+                </tr>"""
+        
+        section_b = f"""
+        <h3 style='margin-top: 30px;'>SECTION B: MATCHED INVESTORS - EXACT MATCHES ONLY</h3>
+        <table border='1' cellpadding='10' cellspacing='0' style='border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 13px;'>
+            <thead style='background-color: #70AD47; color: white;'>
+                <tr>
+                    <th style='text-align: left; padding: 12px; border: 1px solid #333;'>Investor Name</th>
+                    <th style='text-align: right; padding: 12px; border: 1px solid #333;'>Shares</th>
+                    <th style='text-align: right; padding: 12px; border: 1px solid #333;'>% Case</th>
+                    <th style='text-align: left; padding: 12px; border: 1px solid #333;'>Category</th>
+                </tr>
+            </thead>
+            <tbody>{rows_b if rows_b else "<tr><td colspan='4' style='text-align:center;'>No matched investors found</td></tr>"}</tbody>
+        </table>"""
+
+        return f"<div class='investor-report'>{section_a}<div style='margin: 30px 0; border-top: 2px solid #ddd;'></div>{section_b}</div>"
+
+    def generate_valuation_report_html(self, raw_table_md: str, calculated_html: str = "", show_calculations: bool = True) -> str:
+        """
+        Generates HTML for Valuation Analysis.
+        Matches n8n logic.
+        """
+        raw_table_html = self.markdown_to_html(raw_table_md)
+        
+        if not show_calculations:
+            return f"<div class='valuation-report'>{raw_table_html}</div>"
+            
+        return f"""
+        <div class='valuation-report'>
+            <div class='raw-capital-history'>
+                {raw_table_html}
+            </div>
+            <div class='calculated-valuation' style='margin-top: 30px;'>
+                <hr>
+                <h3 style='color: #4B2A06; margin-bottom: 20px;'>VALUATION ANALYSIS & PREMIUM ROUNDS</h3>
+                {calculated_html if calculated_html else "<p>No premium rounds identified for calculation.</p>"}
+            </div>
+        </div>
+        """
+
     def markdown_to_html(self, md: str) -> str:
         """
         Converts markdown with tables and special formatting to HTML snippet.
         """
+        if not md: return ""
         html = md
         
         # 1. Convert Tables
@@ -241,45 +335,39 @@ class HTMLFormatter:
         table_pattern = re.compile(r'(?:\n|^)(?:\|.+\|\s*\n)+', re.MULTILINE)
         html = table_pattern.sub(table_replacer, html)
 
-        # 2. Headers
+        # 2. Section Headers like "SECTION VII: ANALYTICS"
+        html = re.sub(r'^([A-Z\s]+:)(?=\s*$)', r'<h3>\1</h3>', html, flags=re.M)
+        html = re.sub(r'^(SECTION\s+[IVXLCDM]+\s*:.*)$', r'<h3>\1</h3>', html, flags=re.M | re.I)
+
+        # 3. Standard Headers
         html = re.sub(r'^# (.*)$', r'<h1>\1</h1>', html, flags=re.M)
         html = re.sub(r'^## (.*)$', r'<h2>\1</h2>', html, flags=re.M)
         html = re.sub(r'^### (.*)$', r'<h3>\1</h3>', html, flags=re.M)
 
-        # 3. Bold/Italic
+        # 4. Bold/Italic
         html = re.sub(r'\*\*\*(.*?)\*\*\*', r'<strong><em>\1</em></strong>', html)
         html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html)
         html = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html)
 
-        # 4. Lists (with UL wrapping)
+        # 5. Lists
         html = re.sub(r'^[*-] (.*)$', r'<li>\1</li>', html, flags=re.M)
         html = re.sub(r'(<li>.*?</li>(?:\s*<li>.*?</li>)*)', r'<ul>\1</ul>', html, flags=re.S)
 
-        # 5. Links
-        html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank" style="color: #2563eb;">\1</a>', html)
-
-        # 6. Ratios/Currency styling
-        html = re.sub(r'(\d+\.?\d*)\s*%', r'<span class="percentage">\1%</span>', html)
-        html = re.sub(r'₹\s*(\d+(?:,\d+)*(?:\.\d+)?)', r'<span class="currency">₹\1</span>', html)
-
-        # 7. Paragraphs and line breaks (Improved)
-        # Avoid double wrapping if already processed by table/header logic
+        # 6. Formatting Cleanup
         html = html.replace('\n\n', '</p><p>')
         
-        # Only add <br> if it's not following a block tag
+        # Paragraph wrapping and line breaks
         lines = html.split('\n')
-        processed_lines = []
+        processed = []
         for line in lines:
             line = line.strip()
             if not line: continue
             if re.match(r'<(h1|h2|h3|table|thead|tbody|tr|th|td|div|hr|li|p|ul|ol|a)', line):
-                processed_lines.append(line)
+                processed.append(line)
             else:
-                processed_lines.append(line + '<br>')
+                processed.append(line + '<br>')
         
-        html = ''.join(processed_lines)
-        
-        # Wrap the whole thing in a p if it doesn't start with a block tag
+        html = ''.join(processed)
         if not re.match(r'^\s*<(h1|h2|h3|table|div|p|ul|ol)', html):
             html = f'<p>{html}</p>'
 
