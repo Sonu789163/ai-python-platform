@@ -17,8 +17,6 @@ from app.services.summarization.prompts import (
     INVESTOR_EXTRACTOR_SYSTEM_PROMPT,
     CAPITAL_HISTORY_EXTRACTOR_SYSTEM_PROMPT,
     MAIN_SUMMARY_SYSTEM_PROMPT,
-    MAIN_SUMMARY_INSTRUCTIONS,
-    DEFAULT_SUMMARY_FORMAT,
     SUMMARY_VALIDATOR_SYSTEM_PROMPT
 )
 from app.services.summarization.markdown_converter import MarkdownConverter
@@ -51,7 +49,7 @@ class SummaryPipeline:
         namespace: str,
         index_name: str = None,
         host: str = None,
-        vector_top_k: int = 10,
+        vector_top_k: int = 15,
         rerank_top_n: int = 10,
         metadata_filter: Optional[Dict[str, Any]] = None
     ) -> str:
@@ -167,7 +165,7 @@ class SummaryPipeline:
                     {"role": "system", "content": INVESTOR_EXTRACTOR_SYSTEM_PROMPT},
                     {"role": "user", "content": f"Extract investor data from this DRHP context:\n\n{context}"}
                 ],
-                temperature=0.0,
+                temperature=0.1,
                 max_tokens=8192,
                 response_format={"type": "json_object"}
             )
@@ -262,108 +260,110 @@ class SummaryPipeline:
         metadata_filter: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Agent 3: DRHP Summary Generator
+        Agent 3: DRHP Summary Generator (n8n-style: Collect-then-Generate)
         Node: A-3:-DRHP Summary Generator Agent1
-        Uses iterative sub-queries to generate comprehensive summary section-by-section.
-        """
-        logger.info("Agent 3: Summary Generator - Starting Iterative Generation", namespace=namespace)
         
-        full_summary_parts = []
-        total_input_tokens = 0
-        total_output_tokens = 0
+        Flow (matching n8n workflow):
+          Phase 1: Loop through ALL subqueries → retrieve chunks for each → collect ALL chunks
+          Phase 2: ONE single LLM call with ALL collected context → generate full summary
+        """
+        logger.info("Agent 3: Summary Generator - Starting (n8n-style Collect-then-Generate)", namespace=namespace)
         
         # Resolve subqueries: use custom if provided, else fall back to defaults
         active_subqueries = custom_subqueries if custom_subqueries else SUBQUERIES
         logger.info(f"Agent 3: Using {len(active_subqueries)} subqueries (custom={bool(custom_subqueries)})")
         
-        # Iterate through each subquery to generate focused sections
-        # This addresses the issue of missing fields by ensuring each topic gets dedicated context and generation
+        # ── PHASE 1: Collect ALL chunks from ALL subqueries ──
+        logger.info("Agent 3 Phase 1: Retrieving chunks for all subqueries...")
+        all_chunks = []
+        seen_chunks = set()
+        
         for i, query in enumerate(active_subqueries):
             try:
-                # Retrieve context specific to this subquery
-                # We use a focused retrieval (top_k=20) to ensure we get deep details for this specific section
                 context = await self._retrieve_context(
                     [query],
                     namespace,
                     index_name,
                     host,
-                    vector_top_k=15, # Higher top_k for focused single query
+                    vector_top_k=15,
                     rerank_top_n=10,
                     metadata_filter=metadata_filter
                 )
                 
                 if not context:
-                    logger.warning(f"Agent 3: No context found for subquery {i+1}", query=query[:50])
+                    logger.warning(f"Agent 3: No context found for subquery {i+1}/{len(active_subqueries)}", query=query[:80])
                     continue
                 
-                # Construct focused prompt for this section
-                # If custom_sop is provided (e.g. for Excollo domain), use it as the base prompt
-                # overriding the default MAIN_SUMMARY_SYSTEM_PROMPT.
-                # This ensures we strictly follow the domain's specific schema/format.
-                base_prompt = custom_sop if custom_sop else MAIN_SUMMARY_SYSTEM_PROMPT
+                # Split retrieved context into individual chunks and deduplicate
+                chunks = context.split("\n---\n")
+                new_chunks = 0
+                for chunk in chunks:
+                    chunk_stripped = chunk.strip()
+                    if chunk_stripped and chunk_stripped not in seen_chunks:
+                        all_chunks.append(chunk_stripped)
+                        seen_chunks.add(chunk_stripped)
+                        new_chunks += 1
                 
-                section_system_prompt = f"""
-                {base_prompt}
-                
-                ----------------------------------------------------------------
-                ⚡ CURRENT COMPONENT GENERATION MODE ⚡
-                ----------------------------------------------------------------
-                You are currently generating ONLY ONE PART of the full DRHP summary.
-                
-                YOUR CURRENT FOCUS:
-                "{query}"
-                
-                INSTRUCTIONS:
-                1. Based strictly on the provided context, generate the markdown sections/tables relevant to the focus area above.
-                2. Do NOT generate a full document introduction or conclusion unless the focus area explicitly asks for "Basic company details".
-                3. Ensure the output is formatted as proper Markdown that can be appended to the submitted report.
-                4. EXTRACT ALL SPECIFIC DETAILS mentioned in the focus query. Do not summarize broadly if specific metrics are asked.
-                5. If data is missing for specific requested fields, explicitly state it for that field.
-                """
-                
-                response = await self.client.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[
-                        {"role": "system", "content": section_system_prompt},
-                        {"role": "user", "content": f"Generate the summary section for this specific focus area:\n\nFOCUS:\n{query}\n\nCONTEXT:\n{context}"}
-                    ],
-                    temperature=0.1,
-                    max_tokens=4096 
-                )
-                
-                usage = response.usage
-                part_content = response.choices[0].message.content
-                
-                full_summary_parts.append(part_content)
-                total_input_tokens += usage.prompt_tokens
-                total_output_tokens += usage.completion_tokens
-                
-                logger.debug(f"Agent 3: Completed Part {i+1}/{len(SUBQUERIES)}", output_len=len(part_content))
+                logger.debug(f"Agent 3: Subquery {i+1}/{len(active_subqueries)} retrieved {new_chunks} new chunks (total: {len(all_chunks)})")
                 
             except Exception as e:
-                logger.error(f"Agent 3: Failed to generate part {i+1}", error=str(e))
-                # Append error placeholder so structure remains
-                full_summary_parts.append(f"## SECTION {i+1} [GENERATION FAILED]\n\n*System Error: Failed to generate this section. Details: {str(e)}*")
+                logger.error(f"Agent 3: Failed to retrieve for subquery {i+1}", error=str(e))
                 continue
         
-        if not full_summary_parts:
-             return {"markdown": "# Error\n\nNo DRHP data found for summary generation.", "usage": {"input": 0, "output": 0}}
-
-        # Combine all parts
-        full_draft_summary = "\n\n".join(full_summary_parts)
+        if not all_chunks:
+            return {"markdown": "# Error\n\nNo DRHP data found for summary generation.", "usage": {"input": 0, "output": 0}}
         
-        logger.info("Agent 3: Completed Iterative Generation", 
-                    total_parts=len(full_summary_parts),
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens)
+        logger.info(f"Agent 3 Phase 1 Complete: Collected {len(all_chunks)} unique chunks from {len(active_subqueries)} subqueries")
         
-        return {
-            "markdown": full_draft_summary,
-            "usage": {
-                "input": total_input_tokens,
-                "output": total_output_tokens
+        # ── PHASE 2: Single LLM call with ALL collected context ──
+        logger.info("Agent 3 Phase 2: Generating full summary from collected context...")
+        
+        # Combine all chunks into one context block
+        full_context = "\n\n---\n\n".join(all_chunks)
+        
+        # Build the subqueries reference for the user message
+        subqueries_list = "\n".join([f"{i+1}. {sq}" for i, sq in enumerate(active_subqueries)])
+        
+        # Use the domain SOP as the system prompt
+        system_prompt = custom_sop
+        
+        try:
+            response = await self.client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": (
+                        f"Generate a complete, comprehensive DRHP summary covering ALL of the following areas:\n\n"
+                        f"AREAS TO COVER:\n{subqueries_list}\n\n"
+                        f"DRHP CONTEXT DATA:\n{full_context}"
+                    )}
+                ],
+                temperature=0.1,
+                max_tokens=16384
+            )
+            
+            usage = response.usage
+            full_summary = response.choices[0].message.content
+            
+            logger.info("Agent 3: Completed Full Summary Generation", 
+                        context_chunks=len(all_chunks),
+                        input_tokens=usage.prompt_tokens,
+                        output_tokens=usage.completion_tokens)
+            
+            return {
+                "markdown": full_summary,
+                "usage": {
+                    "input": usage.prompt_tokens,
+                    "output": usage.completion_tokens
+                }
             }
-        }
+            
+        except Exception as e:
+            logger.error("Agent 3: Summary generation failed", error=str(e), exc_info=True)
+            return {
+                "markdown": f"# Error\n\nSummary generation failed: {str(e)}",
+                "usage": {"input": 0, "output": 0}
+            }
     
     async def _agent_4_summary_validator(
         self,
@@ -377,51 +377,106 @@ class SummaryPipeline:
         metadata_filter: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Agent 4: DRHP Summary Validator/Previewer
+        Agent 4: DRHP Summary Validator/Previewer (n8n-style: Collect-then-Validate)
         Node: A-4:-DRHP Summary Previewer
-        Validates and corrects the draft summary
+        
+        Flow (matching n8n workflow):
+          Phase 1: Loop through ALL subqueries → retrieve chunks for each → collect ALL chunks
+          Phase 2: ONE single LLM call with draft summary + ALL collected context → validate & correct
+        
+        In n8n, Agent 4 receives $json.output (draft summary) as user prompt and has
+        Pinecone Vector Store3 as a tool. The agent autonomously queries Pinecone to
+        cross-verify every data point. We replicate this by pre-retrieving context
+        for all subqueries and passing it alongside the draft summary.
+        
         Returns: {markdown: str, usage: dict}
         """
-        logger.info("Agent 4: Summary Validator - Starting", namespace=namespace)
+        logger.info("Agent 4: Summary Validator - Starting (n8n-style Collect-then-Validate)", namespace=namespace)
         
-        # Retrieve context for validation using same subqueries as Agent 3
+        # Resolve subqueries: use custom if provided, else fall back to defaults (same as Agent 3)
         active_subqueries = custom_subqueries if custom_subqueries else SUBQUERIES
-        context = await self._retrieve_context(
-            active_subqueries,
-            namespace,
-            index_name,
-            host,
-            vector_top_k=10,
-            rerank_top_n=10,
-            metadata_filter=metadata_filter
-        )
+        logger.info(f"Agent 4: Using {len(active_subqueries)} subqueries for validation (custom={bool(custom_subqueries)})")
         
-        if not context:
+        # ── PHASE 1: Collect ALL chunks from ALL subqueries (same pattern as Agent 3) ──
+        logger.info("Agent 4 Phase 1: Retrieving chunks for validation...")
+        all_chunks = []
+        seen_chunks = set()
+        
+        for i, query in enumerate(active_subqueries):
+            try:
+                context = await self._retrieve_context(
+                    [query],
+                    namespace,
+                    index_name,
+                    host,
+                    vector_top_k=10,
+                    rerank_top_n=10,
+                    metadata_filter=metadata_filter
+                )
+                
+                if not context:
+                    logger.warning(f"Agent 4: No context found for subquery {i+1}/{len(active_subqueries)}", query=query[:80])
+                    continue
+                
+                # Split retrieved context into individual chunks and deduplicate
+                chunks = context.split("\n---\n")
+                new_chunks = 0
+                for chunk in chunks:
+                    chunk_stripped = chunk.strip()
+                    if chunk_stripped and chunk_stripped not in seen_chunks:
+                        all_chunks.append(chunk_stripped)
+                        seen_chunks.add(chunk_stripped)
+                        new_chunks += 1
+                
+                logger.debug(f"Agent 4: Subquery {i+1}/{len(active_subqueries)} retrieved {new_chunks} new chunks (total: {len(all_chunks)})")
+                
+            except Exception as e:
+                logger.error(f"Agent 4: Failed to retrieve for subquery {i+1}", error=str(e))
+                continue
+        
+        if not all_chunks:
             logger.warning("Agent 4: No context for validation, returning draft as-is")
             return {"markdown": draft_summary, "usage": {"input": 0, "output": 0}}
         
-        # Use custom validator prompt if provided, else format default
-        system_prompt = custom_validator_prompt if custom_validator_prompt else SUMMARY_VALIDATOR_SYSTEM_PROMPT
+        logger.info(f"Agent 4 Phase 1 Complete: Collected {len(all_chunks)} unique chunks from {len(active_subqueries)} subqueries")
+        
+        # ── PHASE 2: Single LLM call with draft summary + ALL collected context ──
+        logger.info("Agent 4 Phase 2: Validating and correcting summary...")
+        
+        # Combine all chunks into one context block
+        full_context = "\n\n---\n\n".join(all_chunks)
+        
+        # Build system prompt: validator prompt + formatting SOP (matches n8n Agent 4 system message)
+        system_prompt = custom_validator_prompt
         
         # Append the Formatting SOP so the validator knows the target structure
         if formatting_sop:
             system_prompt += f"\n\n----------------------------------------------------------------\nREFERENCE STANDARD OPERATING PROCEDURE (SOP) / FORMAT:\n----------------------------------------------------------------\n{formatting_sop}"
 
         try:
+            # n8n Agent 4 receives draft summary as user prompt ($json.output)
+            # We provide it along with the collected DRHP context for cross-verification
             response = await self.client.chat.completions.create(
                 model="gpt-4.1-mini",
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Validate and correct this summary against DRHP context:\n\nDRAFT SUMMARY:\n{draft_summary}\n\nDRHP CONTEXT:\n{context}"}
+                    {"role": "user", "content": (
+                        f"{draft_summary}\n\n"
+                        f"----------------------------------------------------------------\n"
+                        f"DRHP/RHP CONTEXT DATA FOR CROSS-VERIFICATION:\n"
+                        f"----------------------------------------------------------------\n"
+                        f"{full_context}"
+                    )}
                 ],
-                temperature=0.0,
+                temperature=0.1,
                 max_tokens=16384
             )
             
             usage = response.usage
             final_summary = response.choices[0].message.content
             
-            logger.info("Agent 4: Completed", 
+            logger.info("Agent 4: Completed Full Validation", 
+                        context_chunks=len(all_chunks),
                         input_tokens=usage.prompt_tokens,
                         output_tokens=usage.completion_tokens)
             
@@ -434,7 +489,7 @@ class SummaryPipeline:
             }
             
         except Exception as e:
-            logger.error("Agent 4: Failed, returning draft", error=str(e), exc_info=True)
+            logger.error("Agent 4: Validation failed, returning draft", error=str(e), exc_info=True)
             return {"markdown": draft_summary, "error": str(e), "usage": {"input": 0, "output": 0}}
     
     async def generate_summary(
@@ -442,6 +497,7 @@ class SummaryPipeline:
         namespace: str,
         domain_id: str,
         tenant_config: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
         index_name: str = None,
         host: str = None
     ) -> Dict[str, Any]:
@@ -460,6 +516,7 @@ class SummaryPipeline:
                     "target_investors": List[str],
                     "custom_summary_sop": str
                 }
+            metadata: Document metadata for filtering (documentId, documentType, etc.)
             index_name: Pinecone index name (optional)
             host: Pinecone host (optional)
         
@@ -476,41 +533,60 @@ class SummaryPipeline:
         
         # Build Metadata Filter for Tenant Isolation
         metadata_filter = {}
+        
+        # Strict metadata filtering based on user requirement:
+        # documentName, documentId, domain, domainId, type = documentType
+        
+        # 1. documentName (namespace)
+        if namespace:
+            metadata_filter["documentName"] = namespace
+            
+        # 2. domainId & domain
         if domain_id:
             metadata_filter["domainId"] = domain_id
+            # If domain name is available in metadata, add it too
+            if metadata and "domain" in metadata:
+                 metadata_filter["domain"] = metadata["domain"]
+        
+        # 3. documentId
+        if metadata and "documentId" in metadata:
+            metadata_filter["documentId"] = metadata["documentId"]
+            
+        # 4. type (documentType)
+        if metadata and "documentType" in metadata:
+            metadata_filter["type"] = metadata["documentType"]
+            
+        logger.info("Using strict metadata filter", filter=metadata_filter)
             
         # Default tenant config
         if not tenant_config:
-            tenant_config = {
-                "investor_match_only": True,
-                "valuation_matching": True,
-                "adverse_finding": True,
-                "target_investors": [],
-                "custom_summary_sop": ""
-            }
+            tenant_config = {}
         
-        # Extract toggles
-        investor_match_enabled = tenant_config.get("investor_match_only", True)
-        valuation_enabled = tenant_config.get("valuation_matching", True)
-        adverse_enabled = tenant_config.get("adverse_finding", True)
-        target_investors = tenant_config.get("target_investors", [])
+        # Feature Toggles
+        investor_match_enabled = tenant_config.get("investor_match_only", False)
+        valuation_enabled = tenant_config.get("valuation_matching", False)
+        adverse_enabled = tenant_config.get("adverse_finding", False)
         
-        # ── Dynamic Prompt Resolution ──
-        # Priority: custom tenant config > hard-coded defaults
-        # Agent 3 prompt: agent3_prompt (from onboarding) -> custom_summary_sop (legacy) -> default
-        custom_sop = (
-            tenant_config.get("agent3_prompt")
-            or tenant_config.get("custom_summary_sop")
-            or ""
-        )
+        # Agent 3 prompt: agent3_prompt (from onboarding) -> fallback to DEFAULT
+        custom_sop = tenant_config.get("agent3_prompt")
         
-        # Agent 4 prompt: agent4_prompt (from onboarding) -> custom_validator_prompt (legacy) -> default
-        custom_validator = (
-            tenant_config.get("agent4_prompt")
-            or tenant_config.get("custom_validator_prompt")
-            or ""
-        )
+        # If custom prompt is missing or empty, fallback to default
+        if not custom_sop or not custom_sop.strip():
+             logger.info("Agent 3: Using Default System SOP from prompts.py")
+             custom_sop = MAIN_SUMMARY_SYSTEM_PROMPT
+        else:
+             logger.info("Agent 3: Using Custom SOP from Domain Schema", preview=custom_sop[:100])
+
         
+        # Agent 4 prompt: agent4_prompt (from onboarding) -> fallback to DEFAULT
+        custom_validator = tenant_config.get("agent4_prompt")
+        
+        if not custom_validator or not custom_validator.strip():
+             logger.info("Agent 4: Using Default Validator Prompt from prompts.py")
+             custom_validator = SUMMARY_VALIDATOR_SYSTEM_PROMPT
+        else:
+             logger.info("Agent 4: Using Custom Validator Prompt from Domain Schema")
+
         # Subqueries: custom_subqueries (from onboarding) -> default SUBQUERIES
         custom_subqueries = tenant_config.get("custom_subqueries", []) or []
         # Validate: must be a non-empty list of strings
@@ -518,12 +594,6 @@ class SummaryPipeline:
             custom_subqueries = [sq for sq in custom_subqueries if isinstance(sq, str) and sq.strip()]
         else:
             custom_subqueries = None  # Will fall back to default SUBQUERIES in agents
-        
-        # Ensure strict override for custom SOP, handling potential empty strings or whitespace
-        if custom_sop and not custom_sop.strip():
-             custom_sop = None
-        if custom_validator and not custom_validator.strip():
-             custom_validator = None
 
         logger.info("Tenant config resolved", 
                     investor_match=investor_match_enabled,
@@ -577,12 +647,16 @@ class SummaryPipeline:
                 u = draft_summary_result.get("usage", {"input": 0, "output": 0})
                 total_usage["input"] += u["input"]
                 total_usage["output"] += u["output"]
+                # LOGGING AGENT 3 OUTPUT (FULL)
+                logger.info("=== AGENT 3 OUTPUT (DRAFT SUMMARY) START ===")
+                print(draft_markdown)
+                logger.info("=== AGENT 3 OUTPUT (DRAFT SUMMARY) END ===")
             
             # PHASE 2: Validation
             logger.info("Phase 2: Validation & Verification")
             
-            # Determine SOP for validation context: Use custom if available, else default
-            validation_sop = custom_sop if custom_sop else MAIN_SUMMARY_SYSTEM_PROMPT
+            # Determine SOP for validation context: Use our resolved custom_sop (which has default if needed)
+            validation_sop = custom_sop
 
             validation_result = await self._agent_4_summary_validator(
                 draft_markdown, 
@@ -598,6 +672,11 @@ class SummaryPipeline:
             u = validation_result.get("usage", {"input": 0, "output": 0})
             total_usage["input"] += u["input"]
             total_usage["output"] += u["output"]
+            
+            # LOGGING AGENT 4 OUTPUT (FULL)
+            logger.info("=== AGENT 4 OUTPUT (FINAL VALIDATED SUMMARY) START ===")
+            print(final_markdown)
+            logger.info("=== AGENT 4 OUTPUT (FINAL VALIDATED SUMMARY) END ===")
             
             # PHASE 3: Markdown Conversion
             logger.info("Phase 3: Markdown Conversion")

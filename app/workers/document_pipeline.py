@@ -248,6 +248,7 @@ def generate_summary(
             namespace=namespace,
             domain_id=domain_id,
             tenant_config=fund_config,
+            metadata=metadata,
             index_name=index_name,
             host=host
         )

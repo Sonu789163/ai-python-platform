@@ -19,8 +19,6 @@ from app.core.config import settings
 from app.services.summarization.prompts import (
     SUBQUERIES,
     SUMMARY_VALIDATOR_SYSTEM_PROMPT,
-    MAIN_SUMMARY_INSTRUCTIONS,
-    DEFAULT_SUMMARY_FORMAT,
     MAIN_SUMMARY_SYSTEM_PROMPT,
 )
 import openai

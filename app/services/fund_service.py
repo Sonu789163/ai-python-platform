@@ -51,8 +51,8 @@ class FundService:
             # Log what config was resolved
             logger.info(
                 f"Fund config loaded for {domain_id}",
-                has_custom_sop=bool(config.get("agent3_prompt") or config.get("custom_summary_sop")),
-                has_custom_validator=bool(config.get("agent4_prompt") or config.get("custom_validator_prompt")),
+                has_custom_sop=bool(config.get("agent3_prompt")),
+                has_custom_validator=bool(config.get("agent4_prompt")),
                 has_custom_subqueries=bool(config.get("custom_subqueries")),
                 onboarding_status=config.get("onboarding_status", "unknown"),
             )
