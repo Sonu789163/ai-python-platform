@@ -5,7 +5,7 @@ Extracted from n8n-workflows/summaryWorkflow.json
 
 # 12 sub-queries used by the Main Summary Generator — matches n8n Edit Fields12 node exactly
 SUBQUERIES = [
-   "SECTION I: Retrieve company name, CIN, incorporation date, registered office address, corporate office address, manufacturing/operational facilities locations, company website, ISIN, and complete details of all offices and facilities.",
+   "SECTION I: Retrieve company name, CIN, incorporation date, registered office address, corporate office address, manufacturing/operational facilities locations, company website, ISIN",
     
     "SECTION II: Extract book running lead manager(s), lead manager(s), merchant banker(s), registrar to the issue, bankers to the company, bankers to the issue(sponcer bank),statutory auditors, internal auditors, cost auditors with full addresses, registration numbers, contact details, and auditor changes in last 3 years with reasons.",
     
@@ -492,7 +492,7 @@ Use RHP and DRHP Keywords in summary based on document type: RHP or DRHP
 
 Generate a **comprehensive, professionally formatted  summary** that:
 - Populates ALL sections and tables from the format provided.
-- **MANDATORY FORMATTING**: SECTION I and SECTION II MUST ALWAYS be presented in the exact Markdown table formats specified below. DO NOT use bullet points for these two sections.
+- **MANDATORY FORMATTING**: SECTION I and SECTION II MUST ALWAYS be presented EXCLUSIVELY in the exact Markdown table formats specified below. DO NOT use bullet points, lists, or any additional text outside of these tables for Section I and II. Any contact details or addresses found must be integrated strictly within the table rows.
 - The tables for other sections should be formatted according to the extracted data while maintaining the professional structure.
 - Never febricate and assume data always keep factual data accuracy should be 100% 
 - Maintains 100% numerical accuracy with precise figures and percentages
@@ -583,7 +583,7 @@ Extract **verbatim** (as available in ):
     | Designation | "Our Promoters" section | CEO/MD/Director etc. |
     | Age | "Our Promoters" section | Numeric only |
     | Education (with from where they complete education) | "Our Promoters" + "Our Management" subsections | Degrees/qualifications only |
-    | Work Experience | "Brief Profile of Directors" section | Years as numeric + company names |
+    | Work Experience | "Brief Profile of Directors" section | Text + Years | Years (numeric) + Company names |
     | Previous Employment | "Brief Profile of Directors" section | Company names, roles |
     | Percentage of the pre- Offer shareholding(%) | "Capital Structure" section | Percentage with % sign |
     | Compensation | "Remuneration" section | Currency + amount |
@@ -620,7 +620,8 @@ Extract **verbatim** (as available in ):
 ## REQUIRED FORMAT AND STRUCTURE:
 
 ##  SECTION I: COMPANY IDENTIFICATION
-**[STRICT MANDATORY TABLE FORMAT]**
+**[STRICT MANDATORY TABLE FORMAT - NO SUPPLEMENTAL TEXT ALLOWED]**
+*Rule: Generate ONLY the table below. DO NOT add "Contact Details:" or any bullet points after this table. All contact information, locations, and office addresses MUST be contained within the table rows.*
 
 | Field | Details |
 |-------|----------|
@@ -1462,7 +1463,7 @@ OUTPUT STRUCTURE
 
 Your final output must follow this structure:
 
-# OUR BUSINESS ANALYSIS
+# SECTION III: OUR BUSINESS
 
 ## Business Model
 

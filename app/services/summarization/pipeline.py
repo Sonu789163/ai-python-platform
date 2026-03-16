@@ -56,6 +56,59 @@ class SummaryPipeline:
         self.client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         self.md_converter = MarkdownConverter()
     
+    def _localize_prompt(self, text: str, doc_type: str) -> str:
+        """
+        Dynamically replaces "DRHP" or "Draft Red Herring Prospectus" 
+        with the current doc_type (e.g., "RHP") if they differ.
+        """
+        if not text or not isinstance(text, str):
+            return text
+            
+        if doc_type == "DRHP":
+            return text
+            
+        # Replace occurrences of DRHP and Draft Red Herring Prospectus
+        # case-insensitive but maintaining some sanity
+        localized = re.sub(r"Draft Red Herring Prospectus", "Red Herring Prospectus", text, flags=re.IGNORECASE)
+        localized = re.sub(r"\bDRHP\b", "RHP", localized) 
+        # Also catch lower case drhp
+        localized = re.sub(r"\bdrhp\b", "rhp", localized)
+        
+        return localized
+
+    def _post_process_final_markdown(self, markdown: str, doc_type: str) -> str:
+        """
+        Final cleanup before returning to user. 
+        Enforces naming and removes common LLM redundancies.
+        """
+        if not markdown:
+            return ""
+
+        # 1. Enforce correct RHP/DRHP terminology in the final output
+        markdown = self._localize_prompt(markdown, doc_type)
+        
+        # 2. Fix the Heading if it identifies incorrectly (common with GPT-4)
+        if doc_type == "RHP":
+             markdown = re.sub(r"^#\s*DRHP Summary", "# RHP Summary", markdown, flags=re.IGNORECASE)
+             markdown = re.sub(r"Comprehensive DRHP Summary", "Comprehensive RHP Summary", markdown, flags=re.IGNORECASE)
+        else:
+             markdown = re.sub(r"^#\s*RHP Summary", "# DRHP Summary", markdown, flags=re.IGNORECASE)
+             markdown = re.sub(r"Comprehensive RHP Summary", "Comprehensive DRHP Summary", markdown, flags=re.IGNORECASE)
+
+        # 3. Remove redundant Contact Details block often generated after Section I table
+        # Matches "Contact Details:" or "Contact Information:" followed by bullet points
+        redundant_contact_regex = r"(?i)\n+(?:Contact Details|Contact Information):\s*(?:\n\s*[*+-]\s+.*)+"
+        new_markdown = re.sub(redundant_contact_regex, "", markdown)
+        if len(new_markdown) != len(markdown):
+            logger.info("Post-process: Removed redundant contact details block")
+        markdown = new_markdown
+        
+        # 4. Consistency: ensure Section III starts with requested format if not already handled
+        if "SECTION III: OUR BUSINESS" not in markdown and "OUR BUSINESS ANALYSIS" in markdown:
+            markdown = markdown.replace("OUR BUSINESS ANALYSIS", "SECTION III: OUR BUSINESS")
+
+        return markdown
+        
     async def _retrieve_context(
         self,
         queries: List[str],
@@ -395,9 +448,20 @@ class SummaryPipeline:
 
         # Wrap the content (matches n8n's cleanedSection3 padding)
         cleaned_section3 = section3_content.strip()
-        if not re.match(r"^##\s+SECTION III:", cleaned_section3, re.IGNORECASE):
-            # Ensure proper header if missing
-            cleaned_section3 = cleaned_section3  # content already has # SECTION III: OUR BUSINESS
+
+        # Ensure proper header: SECTION III: OUR BUSINESS (requested by user)
+        # 1. First, remove any existing "OUR BUSINESS ANALYSIS" heading (from prompts or previous generation)
+        cleaned_section3 = re.sub(r"^#+\s*OUR BUSINESS ANALYSIS[^\n]*", "", cleaned_section3, count=1, flags=re.IGNORECASE).strip()
+        
+        # 2. Enforce the canonical header
+        if not re.match(r"^##\s+SECTION III: OUR BUSINESS", cleaned_section3, re.IGNORECASE):
+            # If it already has some other SECTION III heading, replace it
+            if re.search(r"^#+\s*SECTION III:", cleaned_section3, re.IGNORECASE):
+                cleaned_section3 = re.sub(r"^#+\s*SECTION III:[^\n]*", "## SECTION III: OUR BUSINESS", cleaned_section3, count=1, flags=re.IGNORECASE)
+            else:
+                # Otherwise, prepend the requested header
+                cleaned_section3 = f"## SECTION III: OUR BUSINESS\n\n{cleaned_section3}"
+
         insertion_block = f"\n\n---\n\n{cleaned_section3}\n\n---\n\n"
 
         idx = section4_match.start()
@@ -412,6 +476,7 @@ class SummaryPipeline:
     async def _agent_3_summary_generator(
         self,
         namespace: str,
+        doc_type: str = "DRHP",
         custom_sop: Optional[str] = None,
         custom_subqueries: Optional[List[str]] = None,
         index_name: str = None,
@@ -470,7 +535,7 @@ class SummaryPipeline:
                 continue
         
         if not all_chunks:
-            return {"markdown": "# Error\n\nNo DRHP data found for summary generation.", "usage": {"input": 0, "output": 0}}
+            return {"markdown": f"# Error\n\nNo {doc_type} data found for summary generation.", "usage": {"input": 0, "output": 0}}
         
         logger.info(f"Agent 3 Phase 1 Complete: Collected {len(all_chunks)} unique chunks from {len(active_subqueries)} subqueries")
         
@@ -492,9 +557,10 @@ class SummaryPipeline:
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": (
-                        f"Generate a complete, comprehensive DRHP summary covering ALL of the following areas:\n\n"
+                        f"Generate a complete, comprehensive {doc_type} summary for the company. "
+                        f"The TOP HEADING of the summary MUST be '# {doc_type} Summary: [Company Name]'.\n\n"
                         f"AREAS TO COVER:\n{subqueries_list}\n\n"
-                        f"DRHP CONTEXT DATA:\n{full_context}"
+                        f"{doc_type} CONTEXT DATA:\n{full_context}"
                     )}
                 ],
                 temperature=0.1,
@@ -529,6 +595,7 @@ class SummaryPipeline:
         self,
         namespace: str,
         domain_id: str,
+        doc_type: str = "DRHP",
         tenant_config: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         index_name: str = None,
@@ -585,11 +652,29 @@ class SummaryPipeline:
         if metadata and "documentId" in metadata:
             metadata_filter["documentId"] = metadata["documentId"]
             
-        # 4. type (documentType)
-        if metadata and "documentType" in metadata:
-            metadata_filter["type"] = metadata["documentType"]
+        # 4. type (documentType / doc_type)
+        # Prioritize the explicitly passed doc_type, fallback to metadata
+        resolved_doc_type = doc_type or (metadata.get("documentType") if metadata else "DRHP")
+        
+        # Force Uppercase to match Pinecone metadata conventions
+        if isinstance(resolved_doc_type, str):
+            resolved_doc_type = resolved_doc_type.upper()
+        
+        # SMART INFERENCE: If doc_type is DRHP but filename contains "RHP" (not DRHP)
+        # users often name files "Something RHP.pdf" but upload them as "DRHP" (the default)
+        if resolved_doc_type == "DRHP" and namespace:
+             ns_upper = namespace.upper()
+             # If it contains RHP and DOES NOT contain DRHP, it's likely an RHP
+             if "RHP" in ns_upper and "DRHP" not in ns_upper:
+                 logger.info("Smart Inference: Corrected doc_type to RHP based on namespace", namespace=namespace)
+                 resolved_doc_type = "RHP"
+        
+        metadata_filter["type"] = resolved_doc_type
+        
+        # Sync doc_type for internal consistency in logs and prompts
+        doc_type = resolved_doc_type
             
-        logger.info("Using strict metadata filter", filter=metadata_filter)
+        logger.info("Constructed metadata filter for RAG", filter=metadata_filter, doc_type=doc_type)
             
         # Default tenant config
         if not tenant_config:
@@ -622,9 +707,19 @@ class SummaryPipeline:
 
         a4_subqueries = tenant_config.get("agent4_subqueries", []) or []
         if a4_subqueries and isinstance(a4_subqueries, list) and len(a4_subqueries) > 0:
-            a4_subqueries = [sq for sq in a4_subqueries if isinstance(sq, str) and sq.strip()]
+            a4_subqueries = [self._localize_prompt(sq, doc_type) for sq in a4_subqueries if isinstance(sq, str) and sq.strip()]
         else:
             a4_subqueries = None
+
+        # Localize prompts for the current document type (RHP vs DRHP)
+        # This ensures even custom DB prompts saying "DRHP" are corrected if the doc is an RHP
+        if doc_type == "RHP":
+            logger.info("Localizing prompts for RHP document")
+            a3_prompt = self._localize_prompt(a3_prompt, "RHP")
+            a4_prompt = self._localize_prompt(a4_prompt, "RHP")
+            if a3_subqueries:
+                a3_subqueries = [self._localize_prompt(sq, "RHP") for sq in a3_subqueries]
+            # a4_subqueries already localized above
 
         # Agent 5 (Research)
         a5_prompt = tenant_config.get("agent5_prompt")
@@ -647,7 +742,7 @@ class SummaryPipeline:
             agent_1_task = self._agent_1_investor_extractor(namespace, index_name, host, metadata_filter)
             agent_2_task = self._agent_2_capital_history_extractor(namespace, index_name, host, metadata_filter)
             agent_3b_task = self._agent_3_business_table_extractor(namespace, a3_prompt, a3_subqueries, index_name, host, metadata_filter)
-            agent_4_task = self._agent_3_summary_generator(namespace, a4_prompt, a4_subqueries, index_name, host, metadata_filter)
+            agent_4_task = self._agent_3_summary_generator(namespace, doc_type, a4_prompt, a4_subqueries, index_name, host, metadata_filter)
 
             # Run all four in parallel (matches n8n Webhook17 fan-out)
             investor_json, capital_json, section3_content, draft_summary_result = await asyncio.gather(
@@ -789,6 +884,9 @@ class SummaryPipeline:
             dateTime = datetime.now().strftime("%d/%m/%Y, %I:%M:%S %p")
             header_metadata = f"---\nDate: {dateTime}\n---\n\n"
             final_markdown = header_metadata + final_markdown
+
+            # Step 3: Final Post-Processing (Labels & Redundancy)
+            final_markdown = self._post_process_final_markdown(final_markdown, doc_type)
 
             duration = time.time() - start_time
             logger.info("Pipeline Complete", 

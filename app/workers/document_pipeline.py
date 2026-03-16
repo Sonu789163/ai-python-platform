@@ -1,7 +1,7 @@
 import asyncio
 import time
 import traceback
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from celery import Task
 
 from app.workers.celery_app import celery_app
@@ -247,6 +247,7 @@ def generate_summary(
         return await summary_pipeline.generate_summary(
             namespace=namespace,
             domain_id=domain_id,
+            doc_type=doc_type,
             tenant_config=fund_config,
             metadata=metadata,
             index_name=index_name,

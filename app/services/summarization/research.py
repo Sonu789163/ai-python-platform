@@ -9,7 +9,7 @@ Matches n8n "Message a model2" node:
 """
 import json
 import re
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import openai
 from app.core.config import settings
 from app.core.logging import get_logger
