@@ -1,71 +1,221 @@
 """
-Research service for adverse findings using Perplexity API.
+Adverse Findings Research Service.
+Matches n8n "Message a model2" node:
+  - Model: gpt-4.1-mini (n8n uses gpt-5-mini alias)
+  - Built-in tool: webSearch (searchContextSize: "medium")
+  - System prompt: RESEARCH_SYSTEM_PROMPT (forensic analyst)
+  - Input: company_name from investor agent output
+  - Returns: JSON in the exact structure expected by convert_research_json_to_markdown()
 """
-import httpx
 import json
-from typing import Dict
+import re
+from typing import Dict, Any
+import openai
 from app.core.config import settings
 from app.core.logging import get_logger
-from .prompts import RESEARCH_SYSTEM_PROMPT
+from app.services.summarization.prompts import RESEARCH_SYSTEM_PROMPT
 
 logger = get_logger(__name__)
 
+
 class ResearchService:
+    """
+    Performs adverse findings research using OpenAI with web search.
+    Matches n8n 'Message a model2' node (OpenAI + builtInTools.webSearch).
+    """
+
     def __init__(self):
-        self.api_key = settings.OPENAI_API_KEY # Assuming same as AI key or add PERPLEXITY_API_KEY
-        self.url = "https://api.perplexity.ai/chat/completions"
+        self.client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        # Model matches n8n "gpt-5-mini" — mapped to gpt-4.1-mini (same pipeline model)
+        self.model = "gpt-4.1-mini"
 
-    async def get_adverse_findings(self, company_name: str, promoters: str) -> Dict:
-        """
-        Calls Perplexity API to research adverse findings.
-        """
-        if not hasattr(settings, "PERPLEXITY_API_KEY") or not settings.PERPLEXITY_API_KEY:
-            logger.warning("PERPLEXITY_API_KEY not set, skipping deep research")
-            return {"executive_summary": {"key_findings": "Deep research disabled (no API key)"}}
-
-        payload = {
-            "model": "sonar",
-            "messages": [
-                {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Company: {company_name}, Promoters: {promoters}"}
-            ],
-            "max_tokens": 4000
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {settings.PERPLEXITY_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(self.url, json=payload, headers=headers, timeout=120.0)
-                response.raise_for_status()
-                result = response.json()
-                content = result["choices"][0]["message"]["content"]
-                usage = result.get("usage", {})
-                
-                # Attempt to parse JSON from response
-                start = content.find("{")
-                end = content.rfind("}") + 1
-                if start == -1 or end == 0:
-                     return {"error": "Invalid research output format", "content": content}
-                
-                parsed = json.loads(content[start:end])
-                parsed["_usage"] = {
-                    "input": usage.get("prompt_tokens", 0),
-                    "output": usage.get("completion_tokens", 0)
-                }
-                return parsed
-            except Exception as e:
-                logger.error("Perplexity research failed", error=str(e))
-                return {"error": str(e)}
-    
-    async def research_company(self, company_name: str, promoters: str = "") -> Dict:
+    async def research_company(
+        self, company_name: str, promoters: str = "", custom_sop: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Main research method called by pipeline.
-        Wrapper around get_adverse_findings for consistency.
+        
+        n8n flow replicated:
+          company_name  →  Message a model2 (OpenAI + web_search_preview)
+                       →  Returns JSON { metadata, executive_summary, ... }
         """
-        return await self.get_adverse_findings(company_name, promoters)
+        if not company_name or not company_name.strip():
+            logger.warning("Research: no company name provided, skipping")
+            return self._empty_result("No company name provided")
+
+        logger.info("Research: Starting adverse findings", company=company_name)
+
+        research_sop = custom_sop if custom_sop else RESEARCH_SYSTEM_PROMPT
+
+        # User prompt matches n8n: {{ $json.output.company_name }}
+        user_content = company_name.strip()
+        if promoters:
+            user_content += f"\nPromoters/Key Persons: {promoters}"
+
+        try:
+            # -----------------------------------------------------------------
+            # OpenAI Responses API with web_search_preview tool
+            # Matches n8n builtInTools.webSearch { searchContextSize: "medium" }
+            # -----------------------------------------------------------------
+            response = await self.client.responses.create(
+                model=self.model,
+                tools=[
+                    {
+                        "type": "web_search_preview",
+                        "search_context_size": "medium",
+                    }
+                ],
+                input=[
+                    {"role": "system", "content": research_sop},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+
+            # Extract text from response
+            # n8n path: $input.first().json.output?.[0]?.content?.[0]?.text
+            raw_text = ""
+            for item in (response.output or []):
+                content_list = getattr(item, "content", None) or []
+                for part in content_list:
+                    if getattr(part, "type", None) == "output_text":
+                        raw_text = getattr(part, "text", "") or ""
+                        break
+                if raw_text:
+                    break
+
+            if not raw_text:
+                # Fallback: try .output_text directly
+                raw_text = getattr(response, "output_text", "") or ""
+
+            usage = getattr(response, "usage", None)
+            input_tokens = getattr(usage, "input_tokens", 0) if usage else 0
+            output_tokens = getattr(usage, "output_tokens", 0) if usage else 0
+
+            parsed = self._parse_json_from_text(raw_text)
+            parsed["_usage"] = {"input": input_tokens, "output": output_tokens}
+
+            logger.info(
+                "Research: Completed",
+                company=company_name,
+                adverse_flag=parsed.get("executive_summary", {}).get("adverse_flag"),
+                risk_level=parsed.get("executive_summary", {}).get("risk_level"),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            return parsed
+
+        except Exception as e:
+            logger.error(
+                "Research: OpenAI web search failed, falling back to chat",
+                error=str(e),
+            )
+            # Fallback: plain chat completion without web search
+            return await self._research_fallback(user_content, str(e), custom_sop=research_sop)
+
+    async def _research_fallback(
+        self, user_content: str, original_error: str, custom_sop: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Fallback: plain chat completion without web search tool.
+        Used when Responses API / web search is unavailable.
+        """
+        try:
+            research_sop = custom_sop if custom_sop else RESEARCH_SYSTEM_PROMPT
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": research_sop},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0.0,
+                max_tokens=4000,
+                response_format={"type": "json_object"},
+            )
+            raw_text = response.choices[0].message.content or ""
+            usage = response.usage
+            parsed = self._parse_json_from_text(raw_text)
+            parsed["_usage"] = {
+                "input": usage.prompt_tokens if usage else 0,
+                "output": usage.completion_tokens if usage else 0,
+            }
+            logger.info("Research: Fallback chat completion succeeded")
+            return parsed
+        except Exception as e2:
+            logger.error("Research: Fallback also failed", error=str(e2))
+            result = self._empty_result(f"Research failed: {original_error}")
+            result["_usage"] = {"input": 0, "output": 0}
+            return result
+
+    @staticmethod
+    def _parse_json_from_text(raw: str) -> Dict[str, Any]:
+        """
+        Matches n8n 'convert in mdn3' JSON extraction logic:
+          1. Remove code fences
+          2. Find JSON object via regex
+          3. Safe JSON.parse
+        """
+        if not raw:
+            return {}
+
+        # Remove code fences (matches n8n: replace /^```json/i, /^```/, /```$/g)
+        cleaned = re.sub(r"^```json", "", raw.strip(), flags=re.IGNORECASE)
+        cleaned = re.sub(r"^```", "", cleaned.strip())
+        cleaned = re.sub(r"```$", "", cleaned.strip()).strip()
+
+        # Find JSON object (matches n8n: raw.match(/\{[\s\S]*\}/))
+        json_match = re.search(r"\{[\s\S]*\}", cleaned)
+        if json_match:
+            cleaned = json_match.group(0)
+
+        try:
+            return json.loads(cleaned)
+        except (json.JSONDecodeError, ValueError):
+            return {
+                "executive_summary": {
+                    "key_findings": f"Failed to parse research output: {raw[:300]}"
+                }
+            }
+
+    @staticmethod
+    def _empty_result(reason: str) -> Dict[str, Any]:
+        return {
+            "metadata": {"company": "Unknown", "promoters": "N/A"},
+            "executive_summary": {
+                "adverse_flag": False,
+                "risk_level": "Low",
+                "confidence_overall": 0.0,
+                "key_findings": reason,
+                "red_flags_count": {
+                    "sanctions": 0,
+                    "enforcement_actions": 0,
+                    "criminal_cases": 0,
+                    "high_risk_media": 0,
+                },
+                "recommended_action": "proceed",
+            },
+            "detailed_findings": {
+                "layer1_sanctions": [],
+                "layer2_legal_regulatory": [],
+                "layer3_osint_media": [],
+            },
+            "entity_network": {
+                "associated_companies": [],
+                "associated_persons": [],
+                "beneficial_owners_identified": [],
+                "related_entities_in_adverse_actions": [],
+            },
+            "risk_assessment": {
+                "financial_crime_risk": "Low",
+                "regulatory_compliance_risk": "Low",
+                "reputational_risk": "Low",
+                "sanctions_risk": "Low",
+                "litigation_risk": "Low",
+                "overall_risk_score": 0.0,
+                "risk_factors": ["No adverse findings detected"],
+            },
+            "gaps_and_limitations": [],
+            "next_steps": [],
+        }
+
 
 research_service = ResearchService()

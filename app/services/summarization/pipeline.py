@@ -1,9 +1,21 @@
 """
 DRHP Summary Pipeline - 4-Agent Orchestration
-Matches n8n-workflows/summaryWorkflow.json implementation
-Stores summaries in markdown format with toggle-based conditional sections
+Matches n8n-workflows/summaryWorkflow.json implementation (v1.5)
+
+Agent flow (all n8n-mapped):
+  A-1  → Investor Extractor
+  A-2  → Capital History Extractor
+  A-3  → Section III Business Table Extractor
+  A-4  → Summary Generator (12-section, SECTION I–XII)
+
+Post-processing (all n8n-mapped):
+  Code in JavaScript4         → Insert Section III between SECTION II and SECTION IV
+  combine FULL MDN summary    → Insert investor/capital before SECTION VII,
+                                 research before SECTION XII
+  Date metadata wrapper
 """
 import asyncio
+import re
 import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -17,7 +29,8 @@ from app.services.summarization.prompts import (
     INVESTOR_EXTRACTOR_SYSTEM_PROMPT,
     CAPITAL_HISTORY_EXTRACTOR_SYSTEM_PROMPT,
     MAIN_SUMMARY_SYSTEM_PROMPT,
-    SUMMARY_VALIDATOR_SYSTEM_PROMPT
+    BUSINESS_EXTRACTION_QUERIES,
+    BUSINESS_TABLE_EXTRACTOR_SYSTEM_PROMPT,
 )
 from app.services.summarization.markdown_converter import MarkdownConverter
 from app.services.summarization.research import research_service
@@ -49,7 +62,7 @@ class SummaryPipeline:
         namespace: str,
         index_name: str = None,
         host: str = None,
-        vector_top_k: int = 15,
+        vector_top_k: int = 16,
         rerank_top_n: int = 10,
         metadata_filter: Optional[Dict[str, Any]] = None
     ) -> str:
@@ -249,6 +262,152 @@ class SummaryPipeline:
         except Exception as e:
             logger.error("Agent 2: Failed", error=str(e), exc_info=True)
             return {"error": str(e), "type": "calculation_data"}
+
+    async def _agent_3_business_table_extractor(
+        self,
+        namespace: str,
+        custom_business_sop: Optional[str] = None,
+        custom_business_subqueries: Optional[List[str]] = None,
+        index_name: str = None,
+        host: str = None,
+        metadata_filter: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        A-3: Section III Business Table Extractor
+        Matches n8n node: "A-3: Section III Table Extractor"
+
+        Uses 7 dedicated extraction queries ((custom_business_subqueries if custom_business_subqueries else BUSINESS_EXTRACTION_QUERIES)) focused
+        exclusively on the "Our Business" chapter. Retrieves topK=12 chunks per query
+        (matches n8n DRHP/RHP Vector Store - Business Chapter topK: 12).
+        Returns the extracted markdown string of all tables.
+        """
+        logger.info("A-3 Business Table Extractor: Starting", namespace=namespace)
+
+        # Matches n8n "Extraction Queries - All Tables" → joined with \n\n as prompt
+        user_prompt = (
+            "You will receive 7 sequential extraction queries, each focusing on a specific "
+            "category of tables from the \"Our Business\" chapter.\n\n"
+            "For EACH query:\n"
+            "1. Search the vector store comprehensively\n"
+            "2. Extract EVERY table that matches the query\n"
+            "3. Return tables in perfect Markdown format\n"
+            "4. Preserve all data exactly as shown\n\n"
+            "Queries to process:\n"
+            + "\n\n".join((custom_business_subqueries if custom_business_subqueries else BUSINESS_EXTRACTION_QUERIES))
+        )
+
+        # Retrieve context for all 7 business queries (topK=12 per query, matches n8n)
+        all_context_parts = []
+        seen = set()
+        for i, query in enumerate((custom_business_subqueries if custom_business_subqueries else BUSINESS_EXTRACTION_QUERIES)):
+            try:
+                ctx = await self._retrieve_context(
+                    [query],
+                    namespace,
+                    index_name,
+                    host,
+                    vector_top_k=12,
+                    rerank_top_n=5,
+                    metadata_filter=metadata_filter,
+                )
+                if ctx:
+                    for chunk in ctx.split("\n---\n"):
+                        c = chunk.strip()
+                        if c and c not in seen:
+                            all_context_parts.append(c)
+                            seen.add(c)
+                logger.debug(f"A-3: Query {i+1}/7 retrieved", chars=len(ctx) if ctx else 0)
+            except Exception as qe:
+                logger.warning(f"A-3: Query {i+1} failed", error=str(qe))
+
+        if not all_context_parts:
+            logger.warning("A-3: No business chapter context found")
+            return ""
+
+        full_context = "\n\n---\n\n".join(all_context_parts)
+        logger.info("A-3: Context collected", chunks=len(all_context_parts), chars=len(full_context))
+
+        try:
+            response = await self.client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": custom_business_sop if custom_business_sop else BUSINESS_TABLE_EXTRACTOR_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{user_prompt}\n\n"
+                            f"--- RETRIEVED CONTEXT ---\n\n{full_context}"
+                        ),
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=8192,
+            )
+            section3_content = response.choices[0].message.content or ""
+            usage = response.usage
+            logger.info(
+                "A-3: Completed",
+                output_chars=len(section3_content),
+                input_tokens=usage.prompt_tokens,
+                output_tokens=usage.completion_tokens,
+            )
+
+            # Clean output: Remove any repeating subqueries (OUR BUSINESS: ...)
+            if section3_content:
+                lines = section3_content.split('\n')
+                cleaned_lines = [l for l in lines if not l.strip().startswith("OUR BUSINESS:")]
+                section3_content = '\n'.join(cleaned_lines).strip()
+
+            return section3_content
+        except Exception as e:
+            logger.error("A-3: Failed", error=str(e), exc_info=True)
+            return ""
+
+    @staticmethod
+    def _insert_section3_into_summary(full_summary: str, section3_content: str) -> str:
+        """
+        Inserts Section III (Our Business) content between SECTION II and SECTION IV.
+        Direct Python port of n8n "Code in JavaScript4" code node.
+
+        n8n logic:
+          1. Find ## SECTION IV: ... using regex
+          2. Verify ## SECTION II: exists
+          3. Insert section3_content right before SECTION IV with separators
+        """
+        if not section3_content or not section3_content.strip():
+            logger.info("Section III insertion skipped: no content")
+            return full_summary
+
+        if not full_summary or not isinstance(full_summary, str):
+            return full_summary or ""
+
+        # Find the start of SECTION IV (matches n8n regex: /##\s+SECTION IV:/i)
+        section4_match = re.search(r"##\s+SECTION IV:", full_summary, re.IGNORECASE)
+        if not section4_match:
+            # Section IV not found — append at end
+            logger.warning("Section III insertion: SECTION IV not found, appending at end")
+            return full_summary + f"\n\n---\n\n{section3_content.strip()}\n\n---\n\n"
+
+        # Verify SECTION II exists (sanity check, matches n8n)
+        if not re.search(r"##\s+SECTION II:", full_summary, re.IGNORECASE):
+            logger.warning("Section III insertion: SECTION II not found")
+            return full_summary
+
+        # Wrap the content (matches n8n's cleanedSection3 padding)
+        cleaned_section3 = section3_content.strip()
+        if not re.match(r"^##\s+SECTION III:", cleaned_section3, re.IGNORECASE):
+            # Ensure proper header if missing
+            cleaned_section3 = cleaned_section3  # content already has # SECTION III: OUR BUSINESS
+        insertion_block = f"\n\n---\n\n{cleaned_section3}\n\n---\n\n"
+
+        idx = section4_match.start()
+        merged = full_summary[:idx] + insertion_block + full_summary[idx:]
+        logger.info(
+            "Section III inserted successfully",
+            insertion_point=idx,
+            section3_chars=len(cleaned_section3),
+        )
+        return merged
     
     async def _agent_3_summary_generator(
         self,
@@ -285,7 +444,7 @@ class SummaryPipeline:
                     namespace,
                     index_name,
                     host,
-                    vector_top_k=15,
+                    vector_top_k=16,
                     rerank_top_n=10,
                     metadata_filter=metadata_filter
                 )
@@ -325,7 +484,7 @@ class SummaryPipeline:
         subqueries_list = "\n".join([f"{i+1}. {sq}" for i, sq in enumerate(active_subqueries)])
         
         # Use the domain SOP as the system prompt
-        system_prompt = custom_sop
+        system_prompt = custom_sop if custom_sop and custom_sop.strip() else MAIN_SUMMARY_SYSTEM_PROMPT
         
         try:
             response = await self.client.chat.completions.create(
@@ -365,133 +524,7 @@ class SummaryPipeline:
                 "usage": {"input": 0, "output": 0}
             }
     
-    async def _agent_4_summary_validator(
-        self,
-        draft_summary: str,
-        namespace: str,
-        custom_validator_prompt: Optional[str] = None,
-        formatting_sop: Optional[str] = None,
-        custom_subqueries: Optional[List[str]] = None,
-        index_name: str = None,
-        host: str = None,
-        metadata_filter: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """
-        Agent 4: DRHP Summary Validator/Previewer (n8n-style: Collect-then-Validate)
-        Node: A-4:-DRHP Summary Previewer
-        
-        Flow (matching n8n workflow):
-          Phase 1: Loop through ALL subqueries → retrieve chunks for each → collect ALL chunks
-          Phase 2: ONE single LLM call with draft summary + ALL collected context → validate & correct
-        
-        In n8n, Agent 4 receives $json.output (draft summary) as user prompt and has
-        Pinecone Vector Store3 as a tool. The agent autonomously queries Pinecone to
-        cross-verify every data point. We replicate this by pre-retrieving context
-        for all subqueries and passing it alongside the draft summary.
-        
-        Returns: {markdown: str, usage: dict}
-        """
-        logger.info("Agent 4: Summary Validator - Starting (n8n-style Collect-then-Validate)", namespace=namespace)
-        
-        # Resolve subqueries: use custom if provided, else fall back to defaults (same as Agent 3)
-        active_subqueries = custom_subqueries if custom_subqueries else SUBQUERIES
-        logger.info(f"Agent 4: Using {len(active_subqueries)} subqueries for validation (custom={bool(custom_subqueries)})")
-        
-        # ── PHASE 1: Collect ALL chunks from ALL subqueries (same pattern as Agent 3) ──
-        logger.info("Agent 4 Phase 1: Retrieving chunks for validation...")
-        all_chunks = []
-        seen_chunks = set()
-        
-        for i, query in enumerate(active_subqueries):
-            try:
-                context = await self._retrieve_context(
-                    [query],
-                    namespace,
-                    index_name,
-                    host,
-                    vector_top_k=10,
-                    rerank_top_n=10,
-                    metadata_filter=metadata_filter
-                )
-                
-                if not context:
-                    logger.warning(f"Agent 4: No context found for subquery {i+1}/{len(active_subqueries)}", query=query[:80])
-                    continue
-                
-                # Split retrieved context into individual chunks and deduplicate
-                chunks = context.split("\n---\n")
-                new_chunks = 0
-                for chunk in chunks:
-                    chunk_stripped = chunk.strip()
-                    if chunk_stripped and chunk_stripped not in seen_chunks:
-                        all_chunks.append(chunk_stripped)
-                        seen_chunks.add(chunk_stripped)
-                        new_chunks += 1
-                
-                logger.debug(f"Agent 4: Subquery {i+1}/{len(active_subqueries)} retrieved {new_chunks} new chunks (total: {len(all_chunks)})")
-                
-            except Exception as e:
-                logger.error(f"Agent 4: Failed to retrieve for subquery {i+1}", error=str(e))
-                continue
-        
-        if not all_chunks:
-            logger.warning("Agent 4: No context for validation, returning draft as-is")
-            return {"markdown": draft_summary, "usage": {"input": 0, "output": 0}}
-        
-        logger.info(f"Agent 4 Phase 1 Complete: Collected {len(all_chunks)} unique chunks from {len(active_subqueries)} subqueries")
-        
-        # ── PHASE 2: Single LLM call with draft summary + ALL collected context ──
-        logger.info("Agent 4 Phase 2: Validating and correcting summary...")
-        
-        # Combine all chunks into one context block
-        full_context = "\n\n---\n\n".join(all_chunks)
-        
-        # Build system prompt: validator prompt + formatting SOP (matches n8n Agent 4 system message)
-        system_prompt = custom_validator_prompt
-        
-        # Append the Formatting SOP so the validator knows the target structure
-        if formatting_sop:
-            system_prompt += f"\n\n----------------------------------------------------------------\nREFERENCE STANDARD OPERATING PROCEDURE (SOP) / FORMAT:\n----------------------------------------------------------------\n{formatting_sop}"
 
-        try:
-            # n8n Agent 4 receives draft summary as user prompt ($json.output)
-            # We provide it along with the collected DRHP context for cross-verification
-            response = await self.client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": (
-                        f"{draft_summary}\n\n"
-                        f"----------------------------------------------------------------\n"
-                        f"DRHP/RHP CONTEXT DATA FOR CROSS-VERIFICATION:\n"
-                        f"----------------------------------------------------------------\n"
-                        f"{full_context}"
-                    )}
-                ],
-                temperature=0.1,
-                max_tokens=16384
-            )
-            
-            usage = response.usage
-            final_summary = response.choices[0].message.content
-            
-            logger.info("Agent 4: Completed Full Validation", 
-                        context_chunks=len(all_chunks),
-                        input_tokens=usage.prompt_tokens,
-                        output_tokens=usage.completion_tokens)
-            
-            return {
-                "markdown": final_summary,
-                "usage": {
-                    "input": usage.prompt_tokens,
-                    "output": usage.completion_tokens
-                }
-            }
-            
-        except Exception as e:
-            logger.error("Agent 4: Validation failed, returning draft", error=str(e), exc_info=True)
-            return {"markdown": draft_summary, "error": str(e), "usage": {"input": 0, "output": 0}}
-    
     async def generate_summary(
         self,
         namespace: str,
@@ -567,56 +600,62 @@ class SummaryPipeline:
         valuation_enabled = tenant_config.get("valuation_matching", False)
         adverse_enabled = tenant_config.get("adverse_finding", False)
         
-        # Agent 3 prompt: agent3_prompt (from onboarding) -> fallback to DEFAULT
-        custom_sop = tenant_config.get("agent3_prompt")
-        
-        # If custom prompt is missing or empty, fallback to default
-        if not custom_sop or not custom_sop.strip():
-             logger.info("Agent 3: Using Default System SOP from prompts.py")
-             custom_sop = MAIN_SUMMARY_SYSTEM_PROMPT
+        # Agent 3 (Business)
+        a3_prompt = tenant_config.get("agent3_prompt")
+        if not a3_prompt or not a3_prompt.strip():
+            logger.info("A-3: Using default BUSINESS_TABLE_EXTRACTOR_SYSTEM_PROMPT")
+            a3_prompt = BUSINESS_TABLE_EXTRACTOR_SYSTEM_PROMPT
         else:
-             logger.info("Agent 3: Using Custom SOP from Domain Schema", preview=custom_sop[:100])
+            logger.info("A-3: Using custom business SOP from domain schema", preview=a3_prompt[:100])
 
-        
-        # Agent 4 prompt: agent4_prompt (from onboarding) -> fallback to DEFAULT
-        custom_validator = tenant_config.get("agent4_prompt")
-        
-        if not custom_validator or not custom_validator.strip():
-             logger.info("Agent 4: Using Default Validator Prompt from prompts.py")
-             custom_validator = SUMMARY_VALIDATOR_SYSTEM_PROMPT
+        a3_subqueries = tenant_config.get("agent3_subqueries", []) or []
+        if not a3_subqueries or not isinstance(a3_subqueries, list):
+            a3_subqueries = []
+
+        # Agent 4 (Summary)
+        a4_prompt = tenant_config.get("agent4_prompt")
+        if not a4_prompt or not a4_prompt.strip():
+            logger.info("A-4: Using default MAIN_SUMMARY_SYSTEM_PROMPT")
+            a4_prompt = MAIN_SUMMARY_SYSTEM_PROMPT
         else:
-             logger.info("Agent 4: Using Custom Validator Prompt from Domain Schema")
+            logger.info("A-4: Using custom SOP from domain schema", preview=a4_prompt[:100])
 
-        # Subqueries: custom_subqueries (from onboarding) -> default SUBQUERIES
-        custom_subqueries = tenant_config.get("custom_subqueries", []) or []
-        # Validate: must be a non-empty list of strings
-        if custom_subqueries and isinstance(custom_subqueries, list) and len(custom_subqueries) > 0:
-            custom_subqueries = [sq for sq in custom_subqueries if isinstance(sq, str) and sq.strip()]
+        a4_subqueries = tenant_config.get("agent4_subqueries", []) or []
+        if a4_subqueries and isinstance(a4_subqueries, list) and len(a4_subqueries) > 0:
+            a4_subqueries = [sq for sq in a4_subqueries if isinstance(sq, str) and sq.strip()]
         else:
-            custom_subqueries = None  # Will fall back to default SUBQUERIES in agents
+            a4_subqueries = None
 
-        logger.info("Tenant config resolved", 
-                    investor_match=investor_match_enabled,
-                    valuation=valuation_enabled,
-                    adverse=adverse_enabled,
-                    has_custom_sop=bool(custom_sop),
-                    has_custom_validator=bool(custom_validator),
-                    custom_subqueries_count=len(custom_subqueries) if custom_subqueries else 0)
+        # Agent 5 (Research)
+        a5_prompt = tenant_config.get("agent5_prompt")
+        if not a5_prompt or not a5_prompt.strip():
+            a5_prompt = None
+
+        logger.info(
+            "Tenant config resolved",
+            investor_match=investor_match_enabled,
+            valuation=valuation_enabled,
+            adverse=adverse_enabled,
+            has_custom_a4_sop=bool(tenant_config.get("agent4_prompt")),
+            a4_subqueries_count=len(a4_subqueries) if a4_subqueries else 0,
+        )
         
         try:
             # PHASE 1: Parallel Data Extraction
-            logger.info("Phase 1: Parallel Data Extraction")
-            
+            logger.info("Phase 1: Parallel Extraction (A-1 Investors, A-2 Capital, A-3 Business, A-4 Summary)")
+
             agent_1_task = self._agent_1_investor_extractor(namespace, index_name, host, metadata_filter)
             agent_2_task = self._agent_2_capital_history_extractor(namespace, index_name, host, metadata_filter)
-            agent_3_task = self._agent_3_summary_generator(namespace, custom_sop, custom_subqueries, index_name, host, metadata_filter)
-            
-            # Run agents 1, 2, 3 in parallel
-            investor_json, capital_json, draft_summary_result = await asyncio.gather(
+            agent_3b_task = self._agent_3_business_table_extractor(namespace, a3_prompt, a3_subqueries, index_name, host, metadata_filter)
+            agent_4_task = self._agent_3_summary_generator(namespace, a4_prompt, a4_subqueries, index_name, host, metadata_filter)
+
+            # Run all four in parallel (matches n8n Webhook17 fan-out)
+            investor_json, capital_json, section3_content, draft_summary_result = await asyncio.gather(
                 agent_1_task,
                 agent_2_task,
-                agent_3_task,
-                return_exceptions=True
+                agent_3b_task,
+                agent_4_task,
+                return_exceptions=True,
             )
             
             # Initialize usage tracking
@@ -639,65 +678,58 @@ class SummaryPipeline:
                 total_usage["input"] += u["input"]
                 total_usage["output"] += u["output"]
             
+            # Handle A-3 Business Table Extractor result
+            if isinstance(section3_content, Exception):
+                logger.error("A-3 Business Extractor exception", error=str(section3_content))
+                section3_content = ""
+            elif not isinstance(section3_content, str):
+                section3_content = ""
+
+            # Handle A-4 Summary Generator result
             if isinstance(draft_summary_result, Exception):
-                logger.error("Agent 3 exception", error=str(draft_summary_result))
+                logger.error("Agent 4 (Summary) exception", error=str(draft_summary_result))
                 draft_markdown = f"# Error\n\nSummary generation failed: {str(draft_summary_result)}"
             else:
                 draft_markdown = draft_summary_result.get("markdown", "")
                 u = draft_summary_result.get("usage", {"input": 0, "output": 0})
                 total_usage["input"] += u["input"]
                 total_usage["output"] += u["output"]
-                # LOGGING AGENT 3 OUTPUT (FULL)
-                logger.info("=== AGENT 3 OUTPUT (DRAFT SUMMARY) START ===")
+                logger.info("=== A-4 DRAFT SUMMARY START ===")
                 print(draft_markdown)
-                logger.info("=== AGENT 3 OUTPUT (DRAFT SUMMARY) END ===")
-            
-            # PHASE 2: Validation
-            logger.info("Phase 2: Validation & Verification")
-            
-            # Determine SOP for validation context: Use our resolved custom_sop (which has default if needed)
-            validation_sop = custom_sop
+                logger.info("=== A-4 DRAFT SUMMARY END ===")
 
-            validation_result = await self._agent_4_summary_validator(
-                draft_markdown, 
-                namespace, 
-                custom_validator, 
-                formatting_sop=validation_sop, # Pass the reference SOP
-                custom_subqueries=custom_subqueries, # Same subqueries for consistent coverage
-                index_name=index_name, 
-                host=host, 
-                metadata_filter=metadata_filter
-            )
-            final_markdown = validation_result.get("markdown", draft_markdown)
-            u = validation_result.get("usage", {"input": 0, "output": 0})
-            total_usage["input"] += u["input"]
-            total_usage["output"] += u["output"]
-            
-            # LOGGING AGENT 4 OUTPUT (FULL)
-            logger.info("=== AGENT 4 OUTPUT (FINAL VALIDATED SUMMARY) START ===")
+            # Code in JavaScript4 equivalent: Insert Section III between SECTION II and SECTION IV
+            if section3_content:
+                draft_markdown = self._insert_section3_into_summary(draft_markdown, section3_content)
+                logger.info("Section III inserted into draft summary")
+
+            # draft_markdown IS the final markdown (validator removed)
+            final_markdown = draft_markdown
+            logger.info("=== A-4 FINAL SUMMARY START ===")
             print(final_markdown)
-            logger.info("=== AGENT 4 OUTPUT (FINAL VALIDATED SUMMARY) END ===")
+            logger.info("=== A-4 FINAL SUMMARY END ===")
             
-            # PHASE 3: Markdown Conversion
+            # PHASE 2: Markdown Conversion
             logger.info("Phase 3: Markdown Conversion")
             
             # Convert Agent 1 output to markdown (if enabled)
             investor_markdown = ""
-            if investor_match_enabled and "error" not in investor_json:
+            if "error" not in investor_json:
                 investor_markdown = self.md_converter.convert_investor_json_to_markdown(
-                    investor_json
+                    investor_json,
+                    target_investors=tenant_config.get("target_investors", []),
+                    investor_match_only=investor_match_enabled
                 )
             
-            # Convert Agent 2 output to markdown
-            # Share capital table ALWAYS included, valuation analysis conditional
             capital_markdown = ""
             if "error" not in capital_json:
+                # User requested to remove premium rounds tables (valuation analysis)
                 capital_markdown = self.md_converter.convert_capital_json_to_markdown(
                     capital_json,
-                    include_valuation_analysis=valuation_enabled
+                    include_valuation_analysis=False
                 )
             
-            # PHASE 4: Research (Deep Adverse Findings via Perplexity)
+            # PHASE 3: Research (Deep Adverse Findings via Perplexity)
             research_markdown = ""
             if adverse_enabled:
                 logger.info("Phase 4: Perplexity Research")
@@ -714,7 +746,8 @@ class SummaryPipeline:
 
                 research_json = await research_service.research_company(
                     company_name=company_name,
-                    promoters=promoter_str
+                    promoters=promoter_str,
+                    custom_sop=a5_prompt
                 )
                 research_markdown = self.md_converter.convert_research_json_to_markdown(research_json)
                 
@@ -723,7 +756,7 @@ class SummaryPipeline:
                 total_usage["input"] += u["input"]
                 total_usage["output"] += u["output"]
             
-            # PHASE 5: Final Assembly
+            # PHASE 4: Final Assembly
             logger.info("Phase 5: Final Assembly & Merging")
             
             # Combine Agent 1 (Investors) and Agent 2 (Capital/Valuation)
@@ -734,12 +767,13 @@ class SummaryPipeline:
                 combined_capital_investor += capital_markdown
 
             # Step 1: Insert combined investor/capital data before SECTION VII
+            # Label changed to explicitly link with Section VI as requested
             if combined_capital_investor:
                 final_markdown = self.md_converter.insert_markdown_before_section(
                     final_markdown,
                     combined_capital_investor,
                     "SECTION VII: FINANCIAL PERFORMANCE",
-                    "Matched Investors & Analysis"
+                    "SECTION VI: Matched Investors & Share Capital History"
                 )
 
             # Step 2: Insert research before Section XII
@@ -770,7 +804,7 @@ class SummaryPipeline:
                     "agents_executed": 4,
                     "investor_match_enabled": investor_match_enabled,
                     "valuation_enabled": valuation_enabled,
-                    "adverse_enabled": adverse_enabled
+                    "adverse_enabled": adverse_enabled,
                 }
             }
             

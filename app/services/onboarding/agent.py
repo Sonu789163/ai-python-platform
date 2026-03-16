@@ -18,8 +18,8 @@ from pymongo import MongoClient
 from app.core.config import settings
 from app.services.summarization.prompts import (
     SUBQUERIES,
-    SUMMARY_VALIDATOR_SYSTEM_PROMPT,
     MAIN_SUMMARY_SYSTEM_PROMPT,
+    BUSINESS_TABLE_EXTRACTOR_SYSTEM_PROMPT,
 )
 import openai
 import json
@@ -84,30 +84,29 @@ Inject tenant-specific SOP requirements into the BASE SUMMARIZATION PROMPT while
 # CRITICAL RULES (DO NOT CHANGE):
 - DO NOT remove "Zero Fabrication" or "Exact Transcription" rules.
 - DO NOT change the "Audit Link" or "Contextual Reference" logic.
+- DO NOT change the [STRICT MANDATORY TABLE FORMAT] for Section I and Section II. These sections must always be in table format.
 - Keep the prompt concise; only make changes that are functionally necessary based on the SOP.
 
 # OUTPUT:
 Return the complete, ready-to-use customized system prompt string. No markdown code blocks. No preamble.
 """
 
-AGENT4_PROMPT_CUSTOMIZATION_SYSTEM_PROMPT = """
-# ROLE: Senior Quality Assurance & Prompt Engineer (Validation Systems)
-Your specialty is designing high-precision "Validation Agent" prompts for financial compliance.
+AGENT3_BUSINESS_PROMPT_CUSTOMIZATION_SYSTEM_PROMPT = """
+# ROLE: Lead AI Prompt Engineer (Fintech Summarization)
+Your specialty is modifying "Our Business Table Extractor Prompts" for financial compliance.
 
 # OBJECTIVE:
-Customize the VALIDATOR AGENT system prompt to enforce the specific rules, checklists, and quality standards defined in the tenant's SOP.
+Customize the OUR BUSINESS TABLE EXTRACTOR system prompt to enforce the specific rules, checklists, and data points defined in the tenant's SOP related to the "Our Business" section.
 
-## BASE VALIDATOR PROMPT:
+## BASE BUSINESS EXTRACTOR PROMPT:
 {base_prompt}
 
 # CUSTOMIZATION LOGIC:
-1. **Checklist Synthesis**: Extract every specific requirement, data point, and formatting rule from the SOP and convert them into the "Checklist" section of the prompt.
-2. **Compliance Rules**: If the SOP mentions regulatory standards, ensure the validator specifically checks for these.
-3. **Structure Match**: The validator's logic must perfectly mirror the section structure of the customized Agent 3 prompt (from Task 2).
-4. **Minimalism**: Maintain the existing systematic validation workflow (Audit → Cross-verification → QA). Only update the "what" is being checked, not the "how" it is checked.
+1. **Extraction Rules Synthesis**: Extract any specific requirements related to Business Model, Products, Revenue Breakdown, Concentration, etc., from the SOP and inject them into the extraction rules.
+2. **Minimalism**: Maintain the existing strict format. Only update the "what" is being extracted based on the SOP's specific requirements for the "Our Business" section.
 
 # OUTPUT:
-Return only the full customized validation prompt text. No explanation, no wrapper.
+Return only the full customized business table extractor prompt text. No explanation, no wrapper.
 """
 
 
@@ -310,17 +309,17 @@ class OnboardingAgent:
             return MAIN_SUMMARY_SYSTEM_PROMPT
 
     # ─────────────────────────────────────────────
-    # Task 3: Agent 4 Prompt Customization
+    # Task 3: Agent 3 Business Prompt Customization
     # ─────────────────────────────────────────────
 
-    def _task3_customize_agent4_prompt(self, sop_text: str) -> str:
+    def _task3_customize_agent3_business_prompt(self, sop_text: str) -> str:
         """
-        Task 3: Customize the validator agent (Agent 4) prompt
+        Task 3: Customize the business table extractor (Agent 3 Business) prompt
         based on the tenant's SOP validation rules.
         
-        Returns: Customized Agent 4 system prompt string.
+        Returns: Customized Agent 3 Business system prompt string.
         """
-        logger.info("Task 3: Agent 4 Prompt Customization - Starting")
+        logger.info("Task 3: Agent 3 Business Prompt Customization - Starting")
 
         try:
             response = self.openai_client.chat.completions.create(
@@ -328,13 +327,13 @@ class OnboardingAgent:
                 messages=[
                     {
                         "role": "system",
-                        "content": AGENT4_PROMPT_CUSTOMIZATION_SYSTEM_PROMPT.format(
-                            base_prompt=SUMMARY_VALIDATOR_SYSTEM_PROMPT
+                        "content": AGENT3_BUSINESS_PROMPT_CUSTOMIZATION_SYSTEM_PROMPT.format(
+                            base_prompt=BUSINESS_TABLE_EXTRACTOR_SYSTEM_PROMPT
                         ),
                     },
                     {
                         "role": "user",
-                        "content": f"Customize the validator agent prompt based on this SOP:\n\n{sop_text}",
+                        "content": f"Customize the business table extractor agent prompt based on this SOP:\n\n{sop_text}",
                     },
                 ],
                 temperature=0.2,
@@ -342,13 +341,13 @@ class OnboardingAgent:
 
             custom_prompt = response.choices[0].message.content.strip()
             logger.info(
-                f"Task 3: Completed. Custom Agent 4 prompt length: {len(custom_prompt)} chars"
+                f"Task 3: Completed. Custom Agent 3 Business prompt length: {len(custom_prompt)} chars"
             )
             return custom_prompt
 
         except Exception as e:
-            logger.error(f"Task 3: Failed - {e}. Using default Agent 4 prompt.")
-            return SUMMARY_VALIDATOR_SYSTEM_PROMPT
+            logger.error(f"Task 3: Failed - {e}. Using default Agent 3 Business prompt.")
+            return BUSINESS_TABLE_EXTRACTOR_SYSTEM_PROMPT
 
     # ─────────────────────────────────────────────
     # Main Onboarding Orchestrator
@@ -400,7 +399,7 @@ class OnboardingAgent:
                 "sop_text": "",
                 "custom_subqueries": [],
                 "agent3_prompt": "",
-                "agent4_prompt": "",
+                "agent3_business_prompt": "",
                 "onboarding_status": "completed_no_sop",
                 "last_onboarded": datetime.now(timezone.utc).isoformat(),
                 "investor_match_only": toggles.get("investor_match_only", False),
@@ -421,9 +420,9 @@ class OnboardingAgent:
         logger.info("─── Task 2/3: Agent 3 Prompt Customization ───")
         agent3_prompt = self._task2_customize_agent3_prompt(final_sop_text)
 
-        # ── Task 3: Agent 4 Prompt Customization ──
-        logger.info("─── Task 3/3: Agent 4 Prompt Customization ───")
-        agent4_prompt = self._task3_customize_agent4_prompt(final_sop_text)
+        # ── Task 3: Agent 3 Business Prompt Customization ──
+        logger.info("─── Task 3/3: Agent 3 Business Prompt Customization ───")
+        agent3_business_prompt = self._task3_customize_agent3_business_prompt(final_sop_text)
 
         # ── Store Everything in MongoDB ──
         logger.info("Storing onboarding configuration in MongoDB...")
@@ -439,8 +438,8 @@ class OnboardingAgent:
             # Task 2 output: Agent 3 prompt (Summarization Agent)
             "agent3_prompt": agent3_prompt,
 
-            # Task 3 output: Agent 4 prompt (Validation Agent)
-            "agent4_prompt": agent4_prompt,
+            # Task 3 output: Agent 3 Business Prompt
+            "agent3_business_prompt": agent3_business_prompt,
 
             # Toggles
             "investor_match_only": toggles.get("investor_match_only", False),
@@ -462,7 +461,7 @@ class OnboardingAgent:
             logger.info(f"Onboarding Agent: COMPLETED for domain {domain_id}")
             logger.info(f"  Subqueries: {len(custom_subqueries)} (default: {len(SUBQUERIES)})")
             logger.info(f"  Agent 3 Prompt: {len(agent3_prompt)} chars")
-            logger.info(f"  Agent 4 Prompt: {len(agent4_prompt)} chars")
+            logger.info(f"  Agent 3 Business Prompt: {len(agent3_business_prompt)} chars")
             logger.info(f"═══════════════════════════════════════════════")
         else:
             logger.error(f"Onboarding Agent: FAILED for domain {domain_id}")

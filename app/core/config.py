@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     CELERY_TASK_SERIALIZER: str = "json"
     CELERY_RESULT_SERIALIZER: str = "json"
     CELERY_ACCEPT_CONTENT: list = ["json"]
-    CELERY_TIMEZONE: str = "UTC"
-    CELERY_ENABLE_UTC: bool = True
+    CELERY_TIMEZONE: str = "Asia/Kolkata"
+    CELERY_ENABLE_UTC: bool = False
     
     # MongoDB Configuration
     MONGO_URI: str = "mongodb+srv://sonuv:Sonu12345@cluster0.makyp.mongodb.net/"
@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     PINECONE_RHP_HOST: str = "https://drhp-summarizer-y8firn8.svc.aped-4627-b74a.pinecone.io"
     PERPLEXITY_API_KEY: Optional[str] = None
     COHERE_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
     
     # Backend URLs
     BACKEND_STATUS_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/documents/upload-status/update"
