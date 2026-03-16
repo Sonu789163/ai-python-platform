@@ -1212,12 +1212,12 @@ Example:
 STRICT OUTPUT JSON FORMAT
 
 Return only the following JSON (no extra text or markdown):
-
+```json```
 {
   "metadata": {
-    "company": " {{ $json.company }}",
-    "promoters": {{ $json.promoters }},
-    "investigation_date": "{{ $now }}",
+    "company": "string",
+    "promoters": "string",
+    "investigation_date": "string",
     "jurisdictions_searched": ["India", "UAE", "USA", "UK", "International"],
     "total_sources_checked": 0
   },
@@ -1225,7 +1225,7 @@ Return only the following JSON (no extra text or markdown):
     "adverse_flag": false,
     "risk_level": "Low",
     "confidence_overall": 0.0,
-    "key_findings": "",
+    "key_findings": "string",
     "red_flags_count": {
       "sanctions": 0,
       "enforcement_actions": 0,
@@ -1257,7 +1257,6 @@ Return only the following JSON (no extra text or markdown):
   "gaps_and_limitations": [],
   "next_steps": []
 }
-
 """
 
 

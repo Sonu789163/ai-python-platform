@@ -332,76 +332,65 @@ class MarkdownConverter:
     # Exact Python port of n8n "convert in mdn3" JavaScript code node
     # ------------------------------------------------------------------
 
-    def convert_research_json_to_markdown(self, research_json: Dict[str, Any]) -> str:
+    def convert_research_json_to_markdown(self, data: Dict[str, Any]) -> str:
         """
-        Converts OpenAI web-search JSON to a Compliance Investigation Report.
-        Matches n8n 'convert in mdn3' code node output character-for-character.
+        Converts research JSON output to comprehensive MDN-style markdown report.
+        Matches n8n 'convert in mdn3' node logic.
         """
-        if not research_json or not isinstance(research_json, dict):
+        if not data or "executive_summary" not in data:
             return ""
 
-        metadata        = research_json.get("metadata", {}) or {}
-        exec_sum        = research_json.get("executive_summary", {}) or {}
-        detailed        = research_json.get("detailed_findings", {}) or {}
-        entity_network  = research_json.get("entity_network", {}) or {}
-        risk_assessment = research_json.get("risk_assessment", {}) or {}
-        gaps            = research_json.get("gaps_and_limitations", []) or []
-        next_steps      = research_json.get("next_steps", []) or []
+        # Extract fields with safe fallbacks
+        metadata           = data.get("metadata") or {}
+        exec_sum           = data.get("executive_summary") or {}
+        detailed           = data.get("detailed_findings") or {}
+        entity_network     = data.get("entity_network") or {}
+        risk_assessment    = data.get("risk_assessment") or {}
+        gaps               = data.get("gaps_and_limitations") or []
+        next_steps         = data.get("next_steps") or []
 
-        # ---- metadata fields ----
-        company                = metadata.get("company", "Unknown Company")
-        promoters              = metadata.get("promoters", "Not Available")
-        investigation_date     = metadata.get("investigation_date", "N/A")
-        jurisdictions_searched = metadata.get("jurisdictions_searched", []) or []
-        total_sources_checked  = metadata.get("total_sources_checked", 0)
+        # Metadata
+        company            = metadata.get("company", "Unknown Company")
+        promoters          = metadata.get("promoters", "Not Available")
+        investigation_date = metadata.get("investigation_date", "N/A")
+        jurisdictions      = metadata.get("jurisdictions_searched") or []
+        total_sources      = metadata.get("total_sources_checked", 0)
 
-        # ---- executive_summary fields ----
-        adverse_flag        = exec_sum.get("adverse_flag", False)
-        risk_level          = exec_sum.get("risk_level", "Not Rated")
-        confidence_overall  = exec_sum.get("confidence_overall", 0)
-        key_findings        = exec_sum.get("key_findings", "No findings available.")
-        red_flags_count     = exec_sum.get("red_flags_count", {}) or {}
-        recommended_action  = exec_sum.get("recommended_action", "N/A")
+        # Executive summary
+        adverse_flag       = exec_sum.get("adverse_flag", False)
+        risk_level         = exec_sum.get("risk_level", "Not Rated")
+        confidence_overall = exec_sum.get("confidence_overall", 0)
+        key_findings       = exec_sum.get("key_findings", "No findings available.")
+        red_flags_count    = exec_sum.get("red_flags_count") or {}
+        recommended_action = exec_sum.get("recommended_action", "N/A")
 
-        # ---- risk_assessment fields ----
-        financial_crime_risk      = risk_assessment.get("financial_crime_risk", "N/A")
-        regulatory_compliance_risk = risk_assessment.get("regulatory_compliance_risk", "N/A")
-        reputational_risk         = risk_assessment.get("reputational_risk", "N/A")
-        sanctions_risk            = risk_assessment.get("sanctions_risk", "N/A")
-        litigation_risk           = risk_assessment.get("litigation_risk", "N/A")
-        overall_risk_score        = risk_assessment.get("overall_risk_score", 0)
-        risk_factors              = risk_assessment.get("risk_factors", []) or []
+        # Risk assessment
+        financial_crime    = risk_assessment.get("financial_crime_risk", "N/A")
+        regulatory_risk    = risk_assessment.get("regulatory_compliance_risk", "N/A")
+        reputational_risk  = risk_assessment.get("reputational_risk", "N/A")
+        sanctions_risk     = risk_assessment.get("sanctions_risk", "N/A")
+        litigation_risk    = risk_assessment.get("litigation_risk", "N/A")
+        overall_risk_score = risk_assessment.get("overall_risk_score", 0)
+        risk_factors       = risk_assessment.get("risk_factors") or []
 
-        # ---- detailed_findings ----
-        layer1 = detailed.get("layer1_sanctions", []) or []
-        layer2 = detailed.get("layer2_legal_regulatory", []) or []
-        layer3 = detailed.get("layer3_osint_media", []) or []
+        # Detailed findings
+        l1_sanctions       = detailed.get("layer1_sanctions") or []
+        l2_legal           = detailed.get("layer2_legal_regulatory") or []
+        l3_osint           = detailed.get("layer3_osint_media") or []
 
-        # ---- entity_network ----
-        associated_companies              = entity_network.get("associated_companies", []) or []
-        associated_persons                = entity_network.get("associated_persons", []) or []
-        beneficial_owners_identified      = entity_network.get("beneficial_owners_identified", []) or []
-        related_entities_in_adverse_actions = entity_network.get("related_entities_in_adverse_actions", []) or []
+        # Entity network
+        assoc_companies    = entity_network.get("associated_companies") or []
+        assoc_persons      = entity_network.get("associated_persons") or []
+        beneficial_owners  = entity_network.get("beneficial_owners_identified") or []
+        related_adverse    = entity_network.get("related_entities_in_adverse_actions") or []
 
-        # ---- Helper: formatRiskLevel ----
-        risk_map = {"Low": "🟢 Low", "Moderate": "🟡 Moderate", "High": "🔴 High", "Critical": "🔴 Critical"}
-        formatted_risk = risk_map.get(risk_level, risk_level)
-
-        # ---- Helper: getActionBadge ----
-        badge_map = {
-            "proceed":                            "✅ Proceed",
-            "proceed_with_caution":               "⚠️ Proceed with Caution",
-            "enhanced_due_diligence":             "🔍 Enhanced Due Diligence Required",
-            "enhanced_monitoring_and_verification": "🔍 Enhanced Monitoring & Verification",
-            "do_not_proceed":                     "❌ Do Not Proceed",
-        }
-        action_badge = badge_map.get(str(recommended_action).lower(), recommended_action)
-
-        # ---- Helper: promoterList ----
+        # -- Helper: promoterList --
         if isinstance(promoters, list):
             def _fmt_p(p):
                 if isinstance(p, dict):
-                    return f"{p.get('name', p.get('full_name', 'Unknown'))} ({p.get('role', 'Unknown Role')})"
+                    name = p.get("name") or p.get("full_name") or "Unknown"
+                    role = p.get("role") or "Unknown Role"
+                    return f"{name} ({role})"
                 return str(p)
             promoter_list = ", ".join(_fmt_p(p) for p in promoters)
         elif isinstance(promoters, str):
@@ -409,30 +398,41 @@ class MarkdownConverter:
         else:
             promoter_list = "Not Available"
 
-        # ---- Layer 1: Sanctions ----
-        def _layer1_md(items):
-            if not items:
-                return "✅ **Result:** No sanctions or international debarment records found.\n"
-            return "\n".join(
-                f"- **{i.get('list_name', 'Unknown List')}**: {i.get('summary', 'No details')}"
-                for i in items
-            )
+        # -- Helper: Risk Level --
+        risk_map = {
+            'Low': '🟢 Low',
+            'Moderate': '🟡 Moderate',
+            'High': '🔴 High',
+            'Critical': '🔴 Critical'
+        }
+        formatted_risk = risk_map.get(risk_level, risk_level)
 
-        # ---- Layer 2: Legal & Regulatory ----
-        def _layer2_md(items):
+        # -- Helper: Action Badge --
+        badge_map = {
+            'proceed': '✅ Proceed',
+            'proceed_with_caution': '⚠️ Proceed with Caution',
+            'enhanced_due_diligence': '🔍 Enhanced Due Diligence Required',
+            'enhanced_monitoring_and_verification': '🔍 Enhanced Monitoring & Verification',
+            'do_not_proceed': '❌ Do Not Proceed'
+        }
+        action_badge = badge_map.get(str(recommended_action).lower(), recommended_action)
+
+        # -- Helper: Legal Section --
+        def generate_legal_section(items):
             if not items:
                 return "**Result:** No legal or regulatory enforcement actions found.\n\n"
             md = ""
             for item in items:
                 authority      = item.get("authority", "Unknown Authority")
-                document_id    = item.get("document_id", item.get("case_id", "N/A"))
+                document_id    = item.get("document_id") or item.get("case_id") or "N/A"
                 document_type  = item.get("document_type", "Legal Document")
                 date_of_order  = item.get("date_of_order", "N/A")
                 summary        = item.get("summary", "No summary available")
                 case_status    = item.get("case_status", "Unknown")
                 final_judgment = item.get("final_judgment", "Not determined")
-                doc_anchor     = re.sub(r"[^\w]", "-", str(document_id))
-
+                
+                import re # Import re locally if not already imported globally
+                doc_anchor = re.sub(r"[^\w]", "-", str(document_id))
                 md += f"#### ⚖️ {document_type}\n\n"
                 md += f"**Authority:** {authority}\n\n"
                 md += f"**Document ID:** [{document_id}](#{doc_anchor})\n\n"
@@ -440,8 +440,8 @@ class MarkdownConverter:
                 md += f"**Summary:** {summary}\n\n"
                 md += f"**Status:** {case_status}\n\n"
                 md += f"**Judgment:** {final_judgment}\n\n"
-
-                entities = item.get("entities_mentioned", []) or []
+                
+                entities = item.get("entities_mentioned", [])
                 if entities and isinstance(entities, list):
                     md += "**Entities Mentioned:**\n"
                     for e in entities:
@@ -450,8 +450,8 @@ class MarkdownConverter:
                 md += "---\n\n"
             return md
 
-        # ---- Layer 3: OSINT / Media ----
-        def _layer3_md(items):
+        # -- Helper: Media Section --
+        def generate_media_section(items):
             if not items:
                 return "**Result:** No adverse media coverage found.\n\n"
             md = ""
@@ -467,131 +467,37 @@ class MarkdownConverter:
                 md += "---\n\n"
             return md
 
-        # ---- Helper: formatPersonWithIdentifiers ----
-        def _fmt_person(person):
-            if isinstance(person, str):
-                return person
-            name = person.get("name", "")
-            if not name:
-                return str(person)
-            line = f"**{name}**"
-            if person.get("role"):
-                line += f" - {person['role']}"
-            line += "\n"
-            identifiers = person.get("identifiers", {}) or {}
+        # -- Helper: formatPersonWithIdentifiers --
+        def format_person(person):
+            if isinstance(person, str): return person
+            name = person.get("name")
+            if not name: return str(person)
+            fmt = f"**{name}**"
+            if person.get("role"): fmt += f" - {person['role']}"
+            fmt += "\n"
+            identifiers = person.get("identifiers") or {}
             if isinstance(identifiers, dict):
                 for k, v in identifiers.items():
-                    if v and k != "role_source":
-                        line += f"- {k}: {v}\n"
-            return line
+                    if v and k != 'role_source':
+                        fmt += f"- {k}: {v}\n"
+            return fmt
 
-        # ---- Helper: formatCompanyWithRelationship ----
-        def _fmt_company(company_item):
-            if isinstance(company_item, str):
-                return company_item
-            name = company_item.get("name", "")
-            if not name:
-                return str(company_item)
-            line = f"**{name}**"
-            if company_item.get("relationship"):
-                line += f" - {company_item['relationship']}"
-            line += "\n"
-            if company_item.get("notes"):
-                line += f"  *{company_item['notes']}*\n"
-            return line
+        # -- Helper: formatCompanyWithRelationship --
+        def format_company(co):
+            if isinstance(co, str): return co
+            name = co.get("name")
+            if not name: return str(co)
+            fmt = f"**{name}**"
+            if co.get("relationship"): fmt += f" - {co['relationship']}"
+            fmt += "\n"
+            if co.get("notes"): fmt += f"  *{co['notes']}*\n"
+            return fmt
 
-        # ---- Helper: beneficial owners ----
-        def _fmt_owner(owner):
-            if isinstance(owner, str):
-                return f"- {owner}"
-            name = owner.get("name", "Unknown")
-            ownership = owner.get("ownership", "Ownership stake identified")
-            return f"- **{name}**: {ownership}"
-
-        # ---- Helper: related entities in adverse actions ----
-        def _fmt_related_entity(entity):
-            if isinstance(entity, str):
-                return f"- {entity}"
-            ename  = entity.get("entity", "Unknown")
-            action = entity.get("adverse_action", "Adverse action identified")
-            return f"- **{ename}**: {action}"
-
-        # ---- Entity network block ----
-        has_network = any([associated_companies, associated_persons,
-                           beneficial_owners_identified, related_entities_in_adverse_actions])
-        entity_block = ""
-        if has_network:
-            assoc_co_str = (
-                "\n".join(_fmt_company(c) for c in associated_companies)
-                if associated_companies else "No associated companies identified."
-            )
-            assoc_per_str = (
-                "\n".join(_fmt_person(p) for p in associated_persons)
-                if associated_persons else "No associated persons identified."
-            )
-            beneficial_str = (
-                "\n".join(_fmt_owner(o) for o in beneficial_owners_identified)
-                if beneficial_owners_identified else "No beneficial owners identified."
-            )
-            related_str = (
-                "\n".join(_fmt_related_entity(e) for e in related_entities_in_adverse_actions)
-                if related_entities_in_adverse_actions
-                else "No entities identified in adverse actions."
-            )
-            entity_block = f"""
-
-### Associated Companies
-
-{assoc_co_str}
-
----
-
-### Associated Persons & Key Personnel
-
-{assoc_per_str}
-
----
-
-### Beneficial Owners
-
-{beneficial_str}
-
----
-
-### Entities in Adverse Actions
-
-{related_str}
-
-"""
-
-        # ---- Risk factors block ----
-        risk_factors_block = ""
-        if risk_factors:
-            rf_lines = "\n".join(f"- {f}" for f in risk_factors)
-            risk_factors_block = f"""
-### Contributing Risk Factors
-
-{rf_lines}
-
-"""
-
-        # ---- Next Steps ----
-        next_steps_md = (
-            "\n\n".join(f"{i+1}. {step}" for i, step in enumerate(next_steps))
-            if next_steps else "No specific recommendations at this time."
-        )
-
-        # ---- Gaps ----
-        gaps_md = (
-            "\n".join(f"- **Note:** {gap}" for gap in gaps)
-            if gaps else "- No significant gaps identified."
-        )
-
-        # ---- Confidence ----
+        # -- Build Report --
         confidence_pct = int(round(float(confidence_overall) * 100))
-        jurisdictions_str = ", ".join(jurisdictions_searched) if jurisdictions_searched else "N/A"
+        jurisdictions_str = ", ".join(jurisdictions) if jurisdictions else "N/A"
 
-        report = f"""# Compliance Investigation Report
+        markdown_report = f"""# Compliance Investigation Report
 
 ## Executive Summary
 
@@ -627,7 +533,7 @@ class MarkdownConverter:
 
 **Jurisdictions Searched:** {jurisdictions_str}
 
-**Total Sources Checked:** {total_sources_checked}
+**Total Sources Checked:** {total_sources}
 
 ---
 
@@ -635,19 +541,19 @@ class MarkdownConverter:
 
 ### Layer 1: Sanctions & International Debarment Lists
 
-{_layer1_md(layer1)}
+{("\n".join(f"- **{i.get('list_name', 'Unknown List')}**: {i.get('summary', 'No details')}" for i in l1_sanctions)) if l1_sanctions else "✅ **Result:** No sanctions or international debarment records found.\n"}
 
 ---
 
 ### Layer 2: Legal & Regulatory Actions
 
-{_layer2_md(layer2)}
+{generate_legal_section(l2_legal)}
 
 ---
 
 ### Layer 3: OSINT & Media Intelligence
 
-{_layer3_md(layer3)}
+{generate_media_section(l3_osint)}
 
 ---
 
@@ -657,32 +563,65 @@ class MarkdownConverter:
 
 | Risk Category | Assessment |
 |---|---|
-| **Financial Crime Risk** | {financial_crime_risk} |
-| **Regulatory Compliance Risk** | {regulatory_compliance_risk} |
+| **Financial Crime Risk** | {financial_crime} |
+| **Regulatory Compliance Risk** | {regulatory_risk} |
 | **Reputational Risk** | {reputational_risk} |
 | **Sanctions Risk** | {sanctions_risk} |
 | **Litigation Risk** | {litigation_risk} |
 
 **Overall Risk Score:** {overall_risk_score}/10 ({formatted_risk})
-{risk_factors_block}
+
+{f"\n### Contributing Risk Factors\n\n" + "\n".join(f"- {f}" for f in risk_factors) if risk_factors else ""}
 
 ---
+"""
 
+        # Entity Network section (Conditional)
+        if any([assoc_companies, assoc_persons, beneficial_owners, related_adverse]):
+            markdown_report += f"""
 ## Entity Network & Relationships
-{entity_block}
+
+### Associated Companies
+
+{("\n".join(format_company(c) for c in assoc_companies)) if assoc_companies else "No associated companies identified."}
 
 ---
 
+### Associated Persons & Key Personnel
+
+{("\n".join(format_person(p) for p in assoc_persons)) if assoc_persons else "No associated persons identified."}
+
+---
+
+### Beneficial Owners
+
+{("\n".join(("- " + o) if isinstance(o, str) else (f"- **{o.get('name', 'Unknown')}**: {o.get('ownership', 'Ownership stake identified')}") for o in beneficial_owners)) if beneficial_owners else "No beneficial owners identified."}
+
+---
+
+### Entities in Adverse Actions
+
+{("\n".join(("- " + e) if isinstance(e, str) else (f"- **{e.get('entity', 'Unknown')}**: {e.get('adverse_action', 'Adverse action identified')}") for e in related_adverse)) if related_adverse else "No entities identified in adverse actions."}
+
+---
+"""
+
+        # Recommendations & Next Steps
+        next_steps_str = "\n\n".join(f"{i+1}. {step}" for i, step in enumerate(next_steps)) if next_steps else "No specific recommendations at this time."
+        
+        # Gaps
+        gaps_str = "\n".join(f"- **Note:** {gap}" for gap in gaps) if gaps else "- No significant gaps identified."
+
+        markdown_report += f"""
 ## Recommendations & Next Steps
 
-{next_steps_md}
+{next_steps_str}
 
 ---
 
 ## Investigation Gaps & Limitations
 
-{gaps_md}
-
+{gaps_str}
 
 ---
 
@@ -692,7 +631,7 @@ class MarkdownConverter:
 
 **For questions or clarifications, refer to original source documents and official regulatory authorities in relevant jurisdictions.**
 """
-        return report
+        return markdown_report
 
     def _format_research_items(self, items: List[Any], category: str) -> str:
         """Legacy helper kept for backward compat — only used by old code paths."""

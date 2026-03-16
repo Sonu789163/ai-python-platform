@@ -26,8 +26,8 @@ class ResearchService:
 
     def __init__(self):
         self.client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        # Model matches n8n "gpt-5-mini" — mapped to gpt-4.1-mini (same pipeline model)
-        self.model = "gpt-4.1-mini"
+        # Model name matches n8n request exactly
+        self.model = "gpt-5-mini"
 
     async def research_company(
         self, company_name: str, promoters: str = "", custom_sop: Optional[str] = None
