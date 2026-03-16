@@ -273,9 +273,12 @@ def generate_summary(
             )
         
         # Then update the status to trigger UI refresh
+        pipeline_status = result.get("status", "error")
+        job_status = "completed" if pipeline_status == "success" else "failed"
+        
         backend_notifier.update_summary_status(
             job_id=job_id,
-            status="completed",
+            status=job_status,
             namespace=namespace,
             authorization=metadata.get("authorization", "")
         )

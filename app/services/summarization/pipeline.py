@@ -813,7 +813,8 @@ class SummaryPipeline:
                 investor_markdown = self.md_converter.convert_investor_json_to_markdown(
                     investor_json,
                     target_investors=tenant_config.get("target_investors", []),
-                    investor_match_only=investor_match_enabled
+                    investor_match_only=investor_match_enabled,
+                    doc_type=doc_type
                 )
             
             capital_markdown = ""
@@ -868,7 +869,7 @@ class SummaryPipeline:
                     final_markdown,
                     combined_capital_investor,
                     "SECTION VII: FINANCIAL PERFORMANCE",
-                    "SECTION VI: Matched Investors & Share Capital History"
+                    "Matched Investors & Share Capital History"
                 )
 
             # Step 2: Insert research before Section XII
