@@ -5,7 +5,7 @@ Extracted from n8n-workflows/summaryWorkflow.json
 
 # 12 sub-queries used by the Main Summary Generator — matches n8n Edit Fields12 node exactly
 SUBQUERIES = [
-   "SECTION I: Retrieve company name, CIN, incorporation date, registered office address, corporate office address, manufacturing/operational facilities locations, company website, ISIN, and complete contact details of all offices and facilities.",
+   "SECTION I: Retrieve company name, CIN, incorporation date, registered office address, corporate office address, manufacturing/operational facilities locations, company website, ISIN, and complete details of all offices and facilities.",
     
     "SECTION II: Extract book running lead manager(s), lead manager(s), merchant banker(s), registrar to the issue, bankers to the company, bankers to the issue(sponcer bank),statutory auditors, internal auditors, cost auditors with full addresses, registration numbers, contact details, and auditor changes in last 3 years with reasons.",
     
