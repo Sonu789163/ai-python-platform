@@ -115,7 +115,7 @@ class SummaryPipeline:
         namespace: str,
         index_name: str = None,
         host: str = None,
-        vector_top_k: int = 16,
+        vector_top_k: int = 12,
         rerank_top_n: int = 10,
         metadata_filter: Optional[Dict[str, Any]] = None
     ) -> str:
@@ -276,8 +276,8 @@ class SummaryPipeline:
             namespace,
             index_name,
             host,
-            vector_top_k=10,
-            rerank_top_n=10,
+            vector_top_k=15,
+            rerank_top_n=15,
             metadata_filter=metadata_filter
         )
         
@@ -329,7 +329,7 @@ class SummaryPipeline:
         A-3: Section III Business Table Extractor
         Matches n8n node: "A-3: Section III Table Extractor"
 
-        Uses 7 dedicated extraction queries ((custom_business_subqueries if custom_business_subqueries else BUSINESS_EXTRACTION_QUERIES)) focused
+        Uses 16 dedicated extraction queries ((custom_business_subqueries if custom_business_subqueries else BUSINESS_EXTRACTION_QUERIES)) focused
         exclusively on the "Our Business" chapter. Retrieves topK=12 chunks per query
         (matches n8n DRHP/RHP Vector Store - Business Chapter topK: 12).
         Returns the extracted markdown string of all tables.
@@ -338,7 +338,7 @@ class SummaryPipeline:
 
         # Matches n8n "Extraction Queries - All Tables" → joined with \n\n as prompt
         user_prompt = (
-            "You will receive 7 sequential extraction queries, each focusing on a specific "
+            "You will receive 16 sequential extraction queries, each focusing on a specific "
             "category of tables from the \"Our Business\" chapter.\n\n"
             "For EACH query:\n"
             "1. Search the vector store comprehensively\n"
@@ -359,8 +359,8 @@ class SummaryPipeline:
                     namespace,
                     index_name,
                     host,
-                    vector_top_k=12,
-                    rerank_top_n=5,
+                    vector_top_k=6,
+                    rerank_top_n=6,
                     metadata_filter=metadata_filter,
                 )
                 if ctx:
@@ -509,8 +509,8 @@ class SummaryPipeline:
                     namespace,
                     index_name,
                     host,
-                    vector_top_k=16,
-                    rerank_top_n=10,
+                    vector_top_k=12,
+                    rerank_top_n=12,
                     metadata_filter=metadata_filter
                 )
                 

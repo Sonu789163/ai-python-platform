@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     PERPLEXITY_API_KEY: Optional[str] = None
     COHERE_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
+    SERPER_API_KEY: Optional[str] = None
+    GPT_MODEL: str = "gpt-4o-mini"
     
     # Backend URLs
     BACKEND_STATUS_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/documents/upload-status/update"

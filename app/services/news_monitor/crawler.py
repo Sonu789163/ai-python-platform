@@ -1,11 +1,12 @@
-
 import logging
 import json
-from google import genai
-from google.genai import types
 import httpx
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
+import xml.etree.ElementTree as ET
+import re
+import time
+import random
 from pymongo import MongoClient
 from app.core.config import settings
 
@@ -21,295 +22,260 @@ class NewsMonitorCrawler:
     Migrated to google-genai (V2 SDK) for better tool support.
     """
     
+    RSS_FEEDS = [
+        "https://www.thehindubusinessline.com/companies/feeder/default.rss",
+        "https://economictimes.indiatimes.com/rssfeedsdefault.cms",
+        "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+        "https://economictimes.indiatimes.com/news/company/rssfeeds/2146842.cms",
+        "https://www.livemint.com/rss/companies",
+        "https://www.livemint.com/rss/markets",
+        "https://www.livemint.com/rss/news",
+        "https://www.business-standard.com/rss/home_page_top_stories.rss",
+        "https://www.business-standard.com/rss/companies-101.rss",
+        "https://www.business-standard.com/rss/markets-106.rss",
+        "https://www.moneycontrol.com/rss/latestnews.xml",
+        "https://www.moneycontrol.com/rss/business.xml",
+        "https://www.ft.com/rss/companies"
+    ]
+    
     def __init__(self):
         self.client_db = MongoClient(settings.MONGO_URI)
         self.db = self.client_db[settings.MONGO_DB_NAME]
         self.domains_collection = self.db["domains"]
         self.articles_collection = self.db["newsarticles"]
-        
-        # Configure Gemini
-        api_key = settings.GEMINI_API_KEY
-        if api_key:
-            try:
-                self.client = genai.Client(api_key=api_key)
-                
-                # Preferred models
-                model_options = [
-                    'gemini-2.0-flash-lite',
-                    'gemini-2.0-flash',
-                ]
-                
-                # Check availability and pick the best one
-                available_models = [m.name for m in self.client.models.list()]
-                self.model_name = None
-                for opt in model_options:
-                    # check for full path or just name
-                    clean_opt = opt if opt.startswith('models/') else f'models/{opt}'
-                    if any(clean_opt in m for m in available_models):
-                        self.model_name = opt
-                        break
-                
-                if not self.model_name:
-                    # Fallback to any flash model
-                    flash_models = [m.name for m in available_models if 'flash' in m.lower()]
-                    self.model_name = flash_models[0].replace('models/', '') if flash_models else 'gemini-1.5-flash'
-                
-                logger.info(f"Initialized Gemini Client. Using model: {self.model_name}")
-                
-                # Default config for research with search grounding
-                self.research_config = types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    response_mime_type="application/json"
-                )
-            except Exception as e:
-                logger.error(f"Failed to initialize Gemini Client: {e}")
-                self.client = None
-        else:
-            logger.error("GEMINI_API_KEY not found. News Monitor will not function.")
-            self.client = None
+        logger.info("Initialized NewsMonitorCrawler (GPT + Serper mode).")
 
-    def discover_entities(self, company_name: str) -> Dict[str, List[str]]:
-        """Task 1: Discover Promoters, KMPs, and Group Companies for a given company."""
+    def search_with_serper(self, query: str, entities: Optional[Dict[str, List[str]]] = None) -> List[Dict[str, Any]]:
+        """Search the web using Serper API (News mode) with focus on adverse findings."""
+        if not settings.SERPER_API_KEY:
+            logger.warning("SERPER_API_KEY not found. Skipping Serper search.")
+            return []
+            
+        url = "https://google.serper.dev/search"
+        
+        # Build a robust query covering promoters and group companies if provided
+        search_terms = [query]
+        if entities:
+            # Add up to 2 promoters and 2 group companies to the query to avoid it being too long
+            search_terms.extend(entities.get("promoters", [])[:2])
+            search_terms.extend(entities.get("group_companies", [])[:2])
+        
+        # Focused negative search terms
+        base_query = " OR ".join([f'"{term}"' for term in search_terms])
+        full_query = f"({base_query}) (fraud OR SEBI OR "
+        full_query += '"show cause" OR "investigation" OR "arrest" OR "default" OR "irregularities" OR "penalty")'
+        
+        payload = json.dumps({"q": full_query, "tbm": "nws", "num": 10})
+        headers = {
+            'X-API-KEY': settings.SERPER_API_KEY,
+            'Content-Type': 'application/json'
+        }
+        
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(url, headers=headers, data=payload)
+                response.raise_for_status()
+                data = response.json()
+                
+                results = []
+                for news in data.get("news", []):
+                    results.append({
+                        "title": news.get("title", ""),
+                        "url": news.get("link", ""),
+                        "description": news.get("snippet", ""),
+                        "source": news.get("source", ""),
+                        "publishedDate": news.get("date", ""),
+                        "sourceType": "serper"
+                    })
+                return results
+        except Exception as e:
+            logger.error(f"Serper Search Error query='{full_query}': {e}")
+            return []
+
+
+    def analyze_findings_with_gpt(self, articles: List[Dict[str, Any]], company_list: List[str]) -> List[Dict[str, Any]]:
+        """Use GPT-4o-mini to filter for negative/adverse articles with high speed/low quota usage."""
+        if not articles or not settings.OPENAI_API_KEY:
+            return []
+            
+        batch_size = 15
+        adverse_articles = []
+        
+        for i in range(0, len(articles), batch_size):
+            batch = articles[i:i+batch_size]
+            
+            prompt = f"""
+            Identify strictly NEGATIVE or ADVERSE news findings for these companies: {", ".join(company_list)}
+            
+            Negative news categories: Regulatory (SEBI/RBI), Legal (Court/Firms), Financial (Defaults/Fraud), Governance (Insiders).
+            IGNORE expansion, general news, or stock price updates.
+            
+            Articles to analyze:
+            {json.dumps([{ "title": a['title'], "description": a['description'], "url": a['url'], "source": a['source'] } for a in batch])}
+            
+            RESPONSE: Return a JSON object with a key "findings" containing a list of objects ONLY for negative articles.
+            Format for each item in "findings":
+            {{
+                "url": "original_url",
+                "sentiment": "negative",
+                "riskLevel": "CRITICAL|HIGH|MEDIUM",
+                "findings": "Brief adverse summary explaining why it is flagged",
+                "category": "regulatory|legal|financial|governance"
+            }}
+            If no negative news, findings should be [].
+            """
+            
+            try:
+                url = "https://api.openai.com/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": settings.GPT_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "response_format": { "type": "json_object" }
+                }
+                
+                with httpx.Client(timeout=60.0) as client:
+                    resp = client.post(url, headers=headers, json=payload)
+                    resp.raise_for_status()
+                    result_data = resp.json()["choices"][0]["message"]["content"]
+                    
+                    data = json.loads(result_data)
+                    findings = data.get("findings", [])
+                    
+                    url_map = {a["url"]: a for a in batch}
+                    for f in findings:
+                        if f.get("url") in url_map:
+                            # Verify company is actually mentioned in this finding if possible
+                            item = url_map[f["url"]].copy()
+                            item.update(f)
+                            adverse_articles.append(item)
+            except Exception as e:
+                logger.error(f"GPT Filtering Error: {e}")
+                
+        return adverse_articles
+
+    def discover_entities_gpt(self, company_name: str) -> Dict[str, List[str]]:
+        """Discover Promoters and Group Companies using GPT."""
         default_data = {"promoters": [], "kmp": [], "group_companies": []}
-        if not self.client:
+        if not settings.OPENAI_API_KEY:
             return default_data
             
         prompt = f"""
         Identify the following for the Indian company '{company_name}':
         1. Promoters (Individuals or entities)
-        2. Key Managerial Personnel (KMP) like CEO, CFO, Directors
-        3. Subsidiary or Group Companies
+        2. Subsidiary or Group Companies
         
         Return the result as a strictly valid JSON object with the following structure:
         {{
             "promoters": ["Name 1", "Name 2"],
-            "kmp": ["Name 1", "Name 2"],
             "group_companies": ["Company 1", "Company 2"]
         }}
-        Use Google Search to find the most recent and accurate data.
         """
         
         try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=self.research_config
-            )
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": settings.GPT_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": { "type": "json_object" }
+            }
             
-            # Extract JSON from response
-            data = None
-            if hasattr(response, 'parsed') and response.parsed:
-                data = response.parsed 
-            else:
-                text = response.text
-                if "```json" in text:
-                    text = text.split("```json")[1].split("```")[0].strip()
-                elif "```" in text:
-                    text = text.split("```")[1].split("```")[0].strip()
-                data = json.loads(text)
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = json.loads(resp.json()["choices"][0]["message"]["content"])
                 
-            if not isinstance(data, dict):
-                data = default_data
-
-            logger.info(f"Discovered entities for {company_name}: P:{len(data.get('promoters', []))}, K:{len(data.get('kmp', []))}, G:{len(data.get('group_companies', []))}")
-            return data
+                logger.info(f"Entities discovered for {company_name}: P:{len(data.get('promoters', []))}, G:{len(data.get('group_companies', []))}")
+                return data
         except Exception as e:
-            # Check for rate limit or search tool errors
-            error_str = str(e).lower()
-            if "exhausted" in error_str or "retry" in error_str or "quota" in error_str:
-                msg = f"Gemini Quota Limit for {company_name} (Discovery)"
-                logger.warning(msg)
-                # We return default but we need a way to track the error
-                raise QuotaExhaustedError(msg)
-            else:
-                logger.error(f"Error discovering entities for {company_name}: {e}")
-                raise e
+            logger.error(f"Error discovering entities for {company_name}: {e}")
+            return default_data
 
-    def crawl_adverse_news(self, company_name: str, entities: Dict[str, List[str]], domain_id: str) -> List[Dict[str, Any]]:
-        """Task 2 & 3: Search for negative news and analyze risk."""
-        if not self.client:
+    def fetch_rss_articles(self) -> List[Dict[str, Any]]:
+        """Fetch articles from all configured RSS feeds."""
+        all_articles = []
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.google.com/",
+            "Cache-Control": "no-cache"
+        }
+        
+        with httpx.Client(timeout=45.0, headers=headers, follow_redirects=True) as client:
+            for url in self.RSS_FEEDS:
+                # Handle FT redirect and check FT specific URL
+                target_url = url
+                if "ft.com/rss/companies" in url:
+                    target_url = "https://www.ft.com/companies?format=rss"
+                    
+                try:
+                    logger.info(f"Fetching RSS: {target_url}")
+                    response = client.get(target_url)
+                    response.raise_for_status()
+                    
+                    root = ET.fromstring(response.text)
+                    items = root.findall('.//item')
+                    
+                    source_name = url.split("//")[1].split("/")[0]
+                    
+                    for item in items:
+                        title = item.find('title')
+                        link = item.find('link')
+                        description = item.find('description')
+                        pub_date = item.find('pubDate')
+                        
+                        article = {
+                            "title": title.text if title is not None else "",
+                            "url": link.text if link is not None else "",
+                            "description": description.text if description is not None else "",
+                            "publishedDate": pub_date.text if pub_date is not None else "",
+                            "source": source_name,
+                            "sourceType": "rss"
+                        }
+                        all_articles.append(article)
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to fetch RSS from {url}: {e}")
+                    
+        return all_articles
+
+    def filter_rss_by_companies(self, articles: List[Dict[str, Any]], monitored_companies: List[str]) -> List[Dict[str, Any]]:
+        """Filter articles to only those mentioning monitored companies."""
+        if not monitored_companies:
             return []
             
-        all_entities = [company_name] + entities.get("promoters", []) + entities.get("kmp", []) + entities.get("group_companies", [])
-        entities_str = ", ".join(all_entities)
+        filtered = []
+        # Create regex patterns for whole word matching
+        patterns = [re.compile(rf'\b{re.escape(company)}\b', re.IGNORECASE) for company in monitored_companies]
         
-        prompt = f"""
-        You are an elite financial risk analyst and due diligence investigator. Your job is to analyze real-time news for regulatory breaches and fraud. 
-        I am providing you with a specific Indian company and its officially verified Promoters and Key Managerial Personnel (KMPs). 
-        Target Company: {company_name} 
-        Verified Entities (Promoters, KMPs, Group): {entities_str}
+        for article in articles:
+            text_to_search = f"{article.get('title', '')} {article.get('description', '')}".lower()
+            for company in monitored_companies:
+                # Use a more flexible search that handles companies with special chars like '&'
+                # Check for either whole word or exact containment if it contains special chars
+                if company.lower() in text_to_search:
+                    # Double check it's not a substring of another word if it's alphanumeric
+                    if company.isalnum():
+                        if re.search(rf'\b{re.escape(company)}\b', text_to_search, re.IGNORECASE):
+                            article["company"] = company
+                            filtered.append(article)
+                            break
+                    else:
+                        article["company"] = company
+                        filtered.append(article)
+                        break
+        
+        logger.info(f"RSS Filter: {len(articles)} total -> {len(filtered)} matching companies")
+        return filtered
 
-        YOUR INSTRUCTIONS:
-        1. Use your Google Search capability to find news articles published strictly within the LAST 1 HOUR regarding the Target Company or any individual in the Verified list.
-        2. Search specifically for negative news, including: SEBI violations, show-cause notices, financial fraud, accounting irregularities, loan defaults, insider trading, or arrests.
-        3. CRITICAL RULE: Do NOT hallucinate names. Do NOT analyze individuals who share the same name unless the article explicitly links them to the Target Company. Rely ONLY on the search results you fetch right now. Do not rely on your internal training data.
-        
-        OUTPUT FORMAT: 
-        If you find relevant negative news from the last hour, output a structured JSON response in this list format:
-        [
-            {{
-                "status": "FLAGGED",
-                "entity": "Name of Company or KMP",
-                "title": "Headline of the news",
-                "issue_summary": "Short description of the fraud/SEBI issue",
-                "citation_url": "The exact URL from your search",
-                "source": "Source Name",
-                "publishedDate": "YYYY-MM-DD HH:MM",
-                "riskLevel": "CRITICAL"
-            }}
-        ]
-        
-        If you find NO negative news from the past hour, output exactly: []
-        """
-        
-        try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=self.research_config
-            )
-            
-            data = None
-            if hasattr(response, 'parsed') and response.parsed:
-                data = response.parsed
-            else:
-                text = response.text
-                if "```json" in text:
-                    text = text.split("```json")[1].split("```")[0].strip()
-                elif "```" in text:
-                    text = text.split("```")[1].split("```")[0].strip()
-                
-                if not text or text.strip() == "[]":
-                    return []
-                data = json.loads(text)
-            
-            articles = data if isinstance(data, list) else [data] if data else []
-            
-            # Enrich and map user-provided keys to system keys
-            enriched_articles = []
-            # (Loop continues below)
-            for article in articles:
-                if not isinstance(article, dict): continue
-                
-                # Map user's "issue_summary" to "description" and "citation_url" to "url"
-                article["description"] = article.get("issue_summary", "")
-                article["url"] = article.get("citation_url", "")
-                article["findings"] = article.get("issue_summary", "")
-                article["sentiment"] = "negative"
-                article["category"] = "regulatory"
-                
-                article["domainId"] = domain_id
-                article["crawledAt"] = datetime.now(timezone.utc)
-                try:
-                    if "publishedDate" in article:
-                        article["publishedDate"] = datetime.fromisoformat(article["publishedDate"].replace('Z', '+00:00'))
-                except:
-                    pass
-                enriched_articles.append(article)
-            
-            return enriched_articles
-        except Exception as e:
-            # If search tool limit or other transient error, let the fallback handle it
-            error_str = str(e).lower()
-            if "exhausted" in error_str or "retry" in error_str or "quota" in error_str:
-                msg = f"Gemini Quota Limit for {company_name} (Adverse News)"
-                logger.warning(msg)
-                raise QuotaExhaustedError(msg)
-            else:
-                logger.error(f"Gemini Crawl Error for {company_name}: {e}")
-                raise e
-
-    def batch_crawl_adverse_news(self, companies: List[str], domain_id: str) -> List[Dict[str, Any]]:
-        """Task 2 & 3 (Batched): Search for negative news for multiple companies at once to save quota."""
-        if not self.client or not companies:
-            return []
-            
-        companies_str = ", ".join(companies)
-        
-        current_date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        prompt = f"""
-        You are an elite financial risk analyst. 
-        Current System Time: {current_date_str}
-        
-        Your job is to analyze real-time news for regulatory breaches and fraud across multiple Indian companies simultaneously.
-        
-        TARGET LIST OF COMPANIES: {companies_str}
-
-        YOUR INSTRUCTIONS:
-        1. Use your Google Search capability to find news articles published strictly within the LAST 24 HOURS regarding ANY of the companies in the list.
-        2. DO NOT return any news published before { (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M") }.
-        3. Search specifically for negative news, including: SEBI violations, show-cause notices, financial fraud, accounting irregularities, loan defaults, insider trading, or arrests.
-        4. CRITICAL RULE: Focus ONLY on these specific companies. Do NOT hallucinate. Do NOT analyze unrelated entities or historical data.
-        
-        OUTPUT FORMAT: 
-        If you find relevant adverse news, output a structured JSON response as a list of objects.
-        If NO negative news is found for any company, output exactly: []
-
-        JSON fields:
-        - status: "FLAGGED"
-        - entity: the exact company name from the list
-        - title: the discovery headline
-        - issue_summary: short description of the fraud/SEBI issue
-        - citation_url: exact URL
-        - source: source name
-        - publishedDate: YYYY-MM-DD HH:MM
-        - riskLevel: "CRITICAL" or "HIGH"
-        """
-        
-        try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=self.research_config
-            )
-            
-            data = None
-            if hasattr(response, 'parsed') and response.parsed:
-                data = response.parsed
-            else:
-                text = response.text
-                if "```json" in text:
-                    text = text.split("```json")[1].split("```")[0].strip()
-                elif "```" in text:
-                    text = text.split("```")[1].split("```")[0].strip()
-                
-                if not text or text.strip() == "[]":
-                    return []
-                # Use regex to find the first valid list if loads fails
-                try:
-                    data = json.loads(text)
-                except:
-                    import re
-                    match = re.search(r'\[.*\]', text, re.DOTALL)
-                    if match:
-                        data = json.loads(match.group(0))
-            
-            articles = data if isinstance(data, list) else [data] if data else []
-            
-            enriched_articles = []
-            for article in articles:
-                if not isinstance(article, dict): continue
-                
-                article["description"] = article.get("issue_summary", "")
-                article["url"] = article.get("citation_url", "")
-                article["findings"] = article.get("issue_summary", "")
-                article["sentiment"] = "negative"
-                article["category"] = "regulatory"
-                article["company"] = article.get("entity", "Unknown")
-                
-                article["domainId"] = domain_id
-                article["crawledAt"] = datetime.now(timezone.utc)
-                enriched_articles.append(article)
-            
-            return enriched_articles
-        except Exception as e:
-            error_str = str(e).lower()
-            if "exhausted" in error_str or "retry" in error_str or "quota" in error_str:
-                logger.warning("Gemini Batch Crawl Quota Limit hit.")
-                raise QuotaExhaustedError("Gemini Batch Quota Exhausted")
-            else:
-                logger.error(f"Gemini Batch Crawl Error: {e}")
-                raise e
 
     def merge_articles(self, articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Deduplicate and merge articles by company name."""
@@ -554,54 +520,69 @@ class NewsMonitorCrawler:
         total_articles = 0
         errors = []
         
-        # Try Batch Crawl with Gemini first (Most efficient)
-        companies_to_individual_check = monitored_companies.copy()
-        try:
-            batch_news = self.batch_crawl_adverse_news(monitored_companies, domain_id)
-            if batch_news:
-                logger.info(f"Batch Gemini found {len(batch_news)} adverse articles.")
-                all_news.extend(batch_news)
+        # Step 1: RSS Feeds + Fast Filtering (Code based match)
+        logger.info("Step 1: Checking RSS Feeds...")
+        rss_articles = self.fetch_rss_articles()
+        filtered_rss = self.filter_rss_by_companies(rss_articles, monitored_companies)
+        
+        if filtered_rss:
+            logger.info(f"Found {len(filtered_rss)} matching RSS items. Analyzing sentiment with GPT...")
+            rss_adverse = self.analyze_findings_with_gpt(filtered_rss, monitored_companies)
+            if rss_adverse:
+                all_news.extend(rss_adverse)
+                logger.info(f"Step 1 Complete: Found {len(rss_adverse)} adverse RSS findings.")
+
+        # Step 2: Serper Web Search Fallback (Highly Reliable, Bypasses AI Quotas)
+        logger.info("Step 2: Performing Serper Search for monitored companies...")
+        
+        search_findings = []
+        for company in monitored_companies:
+            logger.info(f"Processing company: {company}")
+            
+            # Sub-step A: Discover entities (Promoters/Group companies) using GPT
+            entities = self.discover_entities_gpt(company)
+            
+            # Sub-step B: Search Serper with improved query for Company + Promoters + Groups
+            logger.info(f"Searching Serper for {company} and associated entities...")
+            serper_results = self.search_with_serper(company, entities)
+            
+            if serper_results:
+                for res in serper_results:
+                    res["company"] = company
                 
-                # Check which companies got news, we might still want to check others with Perplexity
-                for art in batch_news:
-                    ent = art.get("company", "")
-                    if ent in companies_to_individual_check:
-                        companies_to_individual_check.remove(ent)
-        except QuotaExhaustedError as qe:
-            errors.append(str(qe))
-            logger.warning("Gemini Batch failed, falling back to individual checks...")
-        except Exception as e:
-            logger.error(f"Gemini Batch error: {e}")
-            errors.append(f"Batch Error: {str(e)}")
+                # Sub-step C: Filter and analyze with GPT
+                deep_adverse = self.analyze_findings_with_gpt(serper_results, [company])
+                if deep_adverse:
+                    search_findings.extend(deep_adverse)
+            
+            # Tiny delay to avoid aggressive rate limiting on GPT/Serper
+            time.sleep(0.5)
+            
+        if search_findings:
+            all_news.extend(search_findings)
+            logger.info(f"Step 2 Complete: Found {len(search_findings)} web search findings.")
 
-        # For remaining companies or if batch failed, use Perplexity fallback
-        for company in companies_to_individual_check:
-            try:
-                logger.info(f"Fallback/Deep search: {company}")
-                entities = {"promoters": [], "kmp": [], "group_companies": []}
-                news = self.crawl_with_perplexity(company, entities, domain_id)
-                if news:
-                    all_news.extend(news)
-            except Exception as e:
-                errors.append(f"Fallback Error for {company}: {str(e)}")
-
-        # Step 3: Merge and Save
+        # Final Step: Merge and Save
         if all_news:
             merged_news = self.merge_articles(all_news)
-            logger.info(f"Consolidated into {len(merged_news)} company cards from {len(all_news)} findings.")
+            for art in merged_news:
+                art["domainId"] = domain_id
+                art["crawledAt"] = datetime.now(timezone.utc)
+                
+            logger.info(f"Consolidated into {len(merged_news)} company cards from {len(all_news)} total signals.")
             self.save_articles(merged_news, workspace_id)
             total_articles = len(merged_news)
         else:
-            logger.info("No adverse articles found for any company.")
+            logger.info("No adverse articles found from any source.")
             total_articles = 0
                 
         logger.info(f"News Monitor for domain {domain_id} Completed. Total Unique Companies: {total_articles}")
         
         return {
-            "success": len(errors) < len(monitored_companies),
+            "success": True,
             "article_count": total_articles,
             "errors": errors if errors else None,
-            "message": f"Crawl completed. Found findings for {total_articles} companies."
+            "message": f"Monitor completed. Found findings for {total_articles} companies."
         }
 
 def run_monitor(domain_id: Optional[str] = None):
