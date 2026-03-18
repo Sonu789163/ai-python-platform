@@ -36,8 +36,18 @@ celery_app.conf.update(
 # Auto-discover tasks
 # Import tasks explicitly to ensure they are registered
 import app.workers.document_pipeline
+import app.workers.news_tasks
 
 celery_app.autodiscover_tasks(['app.workers'])
+
+# Schedule for Daily News Monitor (12 PM Daily)
+from celery.schedules import crontab
+celery_app.conf.beat_schedule = {
+    'daily-news-monitor-8am': {
+        'task': 'run_daily_news_monitor',
+        'schedule': crontab(hour=8, minute=0),
+    },
+}
 
 
 @task_prerun.connect
