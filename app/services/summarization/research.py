@@ -54,42 +54,21 @@ class ResearchService:
 
         try:
             # -----------------------------------------------------------------
-            # OpenAI Responses API with web_search_preview tool
+            # OpenAI Chat Completions with web_search_preview tool
             # Matches n8n builtInTools.webSearch { searchContextSize: "medium" }
             # -----------------------------------------------------------------
-            response = await self.client.responses.create(
+            response = await self.client.chat.completions.create(
                 model=self.model,
-                tools=[
-                    {
-                        "type": "web_search_preview",
-                        "search_context_size": "medium",
-                    }
-                ],
-                input=[
+                messages=[
                     {"role": "system", "content": research_sop},
                     {"role": "user", "content": user_content},
-                ],
+                ]
             )
 
-            # Extract text from response
-            # n8n path: $input.first().json.output?.[0]?.content?.[0]?.text
-            raw_text = ""
-            for item in (response.output or []):
-                content_list = getattr(item, "content", None) or []
-                for part in content_list:
-                    if getattr(part, "type", None) == "output_text":
-                        raw_text = getattr(part, "text", "") or ""
-                        break
-                if raw_text:
-                    break
-
-            if not raw_text:
-                # Fallback: try .output_text directly
-                raw_text = getattr(response, "output_text", "") or ""
-
-            usage = getattr(response, "usage", None)
-            input_tokens = getattr(usage, "input_tokens", 0) if usage else 0
-            output_tokens = getattr(usage, "output_tokens", 0) if usage else 0
+            raw_text = response.choices[0].message.content or ""
+            usage = response.usage
+            input_tokens = usage.prompt_tokens if usage else 0
+            output_tokens = usage.completion_tokens if usage else 0
 
             parsed = self._parse_json_from_text(raw_text)
             parsed["_usage"] = {"input": input_tokens, "output": output_tokens}
@@ -106,11 +85,12 @@ class ResearchService:
 
         except Exception as e:
             logger.error(
-                "Research: OpenAI web search failed, falling back to chat",
+                "Research: OpenAI research failed",
                 error=str(e),
             )
-            # Fallback: plain chat completion without web search
-            return await self._research_fallback(user_content, str(e), custom_sop=research_sop)
+            result = self._empty_result(f"Research failed: {str(e)}")
+            result["_usage"] = {"input": 0, "output": 0}
+            return result
 
     async def _research_fallback(
         self, user_content: str, original_error: str, custom_sop: Optional[str] = None
@@ -127,8 +107,6 @@ class ResearchService:
                     {"role": "system", "content": research_sop},
                     {"role": "user", "content": user_content},
                 ],
-                temperature=0.0,
-                max_tokens=4000,
                 response_format={"type": "json_object"},
             )
             raw_text = response.choices[0].message.content or ""

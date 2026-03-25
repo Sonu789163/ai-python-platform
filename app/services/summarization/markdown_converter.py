@@ -287,40 +287,8 @@ class MarkdownConverter:
             markdown += "### PART 1: CAPTURED SHARE CAPITAL HISTORY\n\n"
             markdown += markdown_table + "\n\n---\n\n"
         
-        # Add Part 2: Premium Rounds (Valuation Analysis)
-        if include_valuation_analysis and premium_rounds:
-            markdown += "### PART 2: PREMIUM ROUNDS & VALUATION ANALYSIS\n\n"
-            for idx, round_data in enumerate(premium_rounds, 1):
-                if not isinstance(round_data, dict):
-                    continue
-                    
-                shares = clean_number(round_data.get("shares_allotted", ""))
-                price = clean_number(round_data.get("issue_price", ""))
-                face = clean_number(round_data.get("face_value", ""))
-                cumulative = clean_number(round_data.get("cumulative_equity_shares", ""))
-                
-                # Recalculations as per n8n "calculatoer valuation" node
-                round_raised = shares * price
-                dilution = shares / cumulative if cumulative > 0 else 0
-                post_money = round_raised / dilution if dilution > 0 else 0
-                
-                markdown += f"""#### Premium Round {idx}
-
-| Field | Value |
-|---|---|
-| Row Number | {round_data.get('row_number', 'N/A')} |
-| Date of Allotment | {round_data.get('date_of_allotment', 'N/A')} |
-| Nature of Allotment | {round_data.get('nature_of_allotment', 'N/A')} |
-| Shares Allotted | {shares:,.0f} |
-| Face Value (\u20b9) | {face:,.2f} |
-| Issue Price (\u20b9) | {price:,.2f} |
-| Cumulative Equity Shares | {cumulative:,.0f} |
-| Round Raised (\u20b9) | {round_raised:,.2f} |
-| Dilution (Decimal) | {dilution:.4f} |
-| Dilution (%) | {dilution * 100:.2f}% |
-| Post Money Valuation (\u20b9) | {post_money:,.2f} |
-
-"""
+        # PART 2 removed: Premium round data is already in the combined
+        # "Share Capital History With Valuation" table above.
         
         if not markdown:
             return "\n### No share capital history or premium rounds found.\n"
@@ -647,6 +615,42 @@ class MarkdownConverter:
             md += "---\n\n"
         return md
 
+    def replace_section_content(
+        self,
+        full_markdown: str,
+        section_header_to_find: str,
+        new_content: str
+    ) -> str:
+        """
+        Replaces the content of a specific section with new content.
+        Keeps the header, but replaces everything until the next SECTION header.
+        """
+        if not full_markdown or not section_header_to_find or not new_content:
+            return full_markdown
+
+        # 1. Find the target section header
+        clean_header = re.escape(section_header_to_find).replace(r'\ ', r'\s+')
+        pattern = rf'(^#{{1,4}}\s+.*{clean_header}.*$)'
+        match = re.search(pattern, full_markdown, re.IGNORECASE | re.MULTILINE)
+        
+        if not match:
+            # If not found, just append (fallback)
+            return full_markdown + f"\n\n## {section_header_to_find} (RECOVERED)\n\n{new_content}"
+
+        header_end = match.end()
+        
+        # 2. Find the start of the NEXT section (next header starting with #)
+        # We look for the next line starting with # after the current header
+        remaining_text = full_markdown[header_end:]
+        next_header_match = re.search(r'^#+.*SECTION\s+', remaining_text, re.MULTILINE | re.IGNORECASE)
+        
+        if next_header_match:
+            next_header_start = header_end + next_header_match.start()
+            return full_markdown[:header_end] + "\n\n" + new_content.strip() + "\n\n" + full_markdown[next_header_start:]
+        else:
+            # If it's the last section, replace everything until end
+            return full_markdown[:header_end] + "\n\n" + new_content.strip() + "\n"
+
     def insert_markdown_before_section(
         self,
         full_markdown: str,
@@ -673,19 +677,33 @@ class MarkdownConverter:
         if not insert_markdown or not isinstance(insert_markdown, str) or not insert_markdown.strip():
             return full_markdown
         
-        # Try to find section header (case-insensitive, handles extra spaces)
-        # We look for the section title within the line, ignoring extra spaces
+        # 1. Primary Strategy: Try to find exactly what was requested (e.g., "SECTION VII")
         clean_header = re.escape(section_header).replace(r'\ ', r'\s+')
-        pattern = rf'(^#{{1,4}}\s+.*{clean_header}.*$)'
-        match = re.search(pattern, full_markdown, re.IGNORECASE | re.MULTILINE)
+        primary_pattern = rf'(^#{{1,4}}\s+.*{clean_header}.*$)'
+        match = re.search(primary_pattern, full_markdown, re.IGNORECASE | re.MULTILINE)
         
+        # 2. Secondary Strategy: If looking for VII, also try SECTION 7 or common alternate names
+        if not match and "SECTION VII" in section_header.upper():
+            # Try matching "SECTION 7" or "7. " or "FINANCIAL PERFORMANCE"
+            alternates = [r'SECTION\s+7', r'^#+\s+7[\.\s]', r'FINANCIAL\s+PERFORMANCE']
+            for alt in alternates:
+                alt_pattern = rf'(^#{{1,4}}\s+.*{alt}.*$)'
+                match = re.search(alt_pattern, full_markdown, re.IGNORECASE | re.MULTILINE)
+                if match: break
+
+        # 3. Tertiary Strategy: Just look for any numbered header after the current one if applicable
+        # (Omitted for safety/simplicity unless purely sequential)
+
         if match:
             insertion_point = match.start()
-            insertion_content = f"\n---\n\n## {section_label}\n\n{insert_markdown}\n\n---\n\n"
+            # Surround with some spacing and horizontal rules for clarity
+            insertion_content = f"\n\n---\n\n## {section_label}\n\n{insert_markdown.strip()}\n\n---\n\n"
             return full_markdown[:insertion_point] + insertion_content + full_markdown[insertion_point:]
         else:
-            # If section not found, append at end
-            insertion_content = f"\n\n---\n\n## {section_label}\n\n{insert_markdown}\n"
+            # 4. Fallback: If section not found, append at end of document
+            # Log it so we know it fell back (stdout goes to celery logs)
+            print(f"DEBUG: Could not find insertion point for {section_header}, appending at end.")
+            insertion_content = f"\n\n---\n\n## {section_label}\n\n{insert_markdown.strip()}\n"
             return full_markdown + insertion_content
 
 

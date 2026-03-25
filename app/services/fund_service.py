@@ -34,7 +34,7 @@ class FundService:
             return {}
 
         try:
-            if not mongodb.sync_db:
+            if mongodb.sync_db is None:
                 mongodb.connect_sync()
             
             collection = mongodb.get_sync_collection(self._collection_name)
@@ -70,7 +70,7 @@ class FundService:
             return {}
 
         try:
-            if not mongodb.sync_db:
+            if mongodb.sync_db is None:
                 mongodb.connect_sync()
             
             collection = mongodb.get_sync_collection(self._collection_name)

@@ -25,9 +25,25 @@ class MongoDB:
     async def connect(self) -> None:
         """Establish async MongoDB connection."""
         try:
-            self.client = AsyncIOMotorClient(settings.MONGO_URI, serverSelectionTimeoutMS=5000)
-            self.db = self.client[settings.MONGO_DB_NAME]
-            # Test connection
+            import asyncio
+            # Detect loop changes (common in Celery workers using asyncio.run)
+            loop = asyncio.get_running_loop()
+            
+            # Reconnect if loop changed or client is missing
+            try:
+                if self.client is not None and self.client.get_io_loop() != loop:
+                    logger.info("MongoDB: Event loop changed, resetting connection")
+                    self.client.close()
+                    self.client = None
+                    self.db = None
+            except Exception:
+                self.client = None
+
+            if self.client is None:
+                self.client = AsyncIOMotorClient(settings.MONGO_URI, serverSelectionTimeoutMS=5000)
+                self.db = self.client[settings.MONGO_DB_NAME]
+                
+            # Always ensure db is reachable
             await self.client.admin.command('ping')
             logger.info(
                 "MongoDB connected",
@@ -35,12 +51,12 @@ class MongoDB:
                 environment=settings.APP_ENV
             )
         except Exception as e:
-            logger.warning("MongoDB connection failed, but continuing startup", error=str(e))
+            logger.warning(f"MongoDB connection failed: {str(e)}")
             # Don't raise, allowing server to start for local dev
     
     async def disconnect(self) -> None:
         """Close async MongoDB connection."""
-        if self.client:
+        if self.client is not None:
             self.client.close()
             logger.info("MongoDB disconnected")
     
@@ -62,7 +78,7 @@ class MongoDB:
     
     def disconnect_sync(self) -> None:
         """Close synchronous MongoDB connection."""
-        if self.sync_client:
+        if self.sync_client is not None:
             self.sync_client.close()
             logger.info("MongoDB sync connection closed")
     

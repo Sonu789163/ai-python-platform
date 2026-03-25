@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     LOG_FORMAT: str = "json"
     
     # AI/ML Settings
-    MAX_CHUNK_SIZE: int = 4000
+    MAX_CHUNK_SIZE: int = 4800
     CHUNK_OVERLAP: int = 800
     EMBEDDING_DIMENSION: int = 3072  # text-embedding-3-large
     EMBEDDING_MODEL: str = "text-embedding-3-large"
@@ -66,28 +66,49 @@ class Settings(BaseSettings):
     PINECONE_API_KEY: str = ""
     PINECONE_ENVIRONMENT: str = "us-east-1"
     
-    # Single Index Configuration
-    PINECONE_DRHP_INDEX: str = "drhp-summarizer"
-    PINECONE_RHP_INDEX: str = "drhp-summarizer"
-    PINECONE_DRHP_HOST: str = "https://drhp-summarizer-y8firn8.svc.aped-4627-b74a.pinecone.io"
-    PINECONE_RHP_HOST: str = "https://drhp-summarizer-y8firn8.svc.aped-4627-b74a.pinecone.io"
+    # Pinecone Index settings (will be overridden by .env if provided)
+    PINECONE_INDEX: str ="drhp-test" #"drhp-summarizer"
+    PINECONE_INDEX_HOST: str ="https://drhp-test-w5m6qxe.svc.aped-4627-b74a.pinecone.io"    # "https://drhp-summarizer-y8firn8.svc.aped-4627-b74a.pinecone.io"
+    
     PERPLEXITY_API_KEY: Optional[str] = None
     COHERE_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
     SERPER_API_KEY: Optional[str] = None
     GPT_MODEL: str = "gpt-4o-mini"
     
-    # Backend URLs
-    BACKEND_STATUS_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/documents/upload-status/update"
-    REPORT_CREATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/reports/create-report"
-    REPORT_STATUS_UPDATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/reports/report-status/update"
-    CHAT_STATUS_UPDATE_URL: str = "https://smart-rhtp-backend-2.onrender.com/api/chats/chat-status/update"
-    SUMMARY_CREATE_URL: str = "http://localhost:5000/api/summaries/create"
-    SUMMARY_STATUS_UPDATE_URL: str = "http://localhost:5000/api/summaries/summary-status/update"
+    # Internal authentication (Node <-> Python)
+    INTERNAL_SECRET: str = ""  # Shared secret for internal API calls
+    NODE_BACKEND_URL: str = "http://localhost:5000"  # Node.js backend base URL
+    
+    # Backend callback URLs (initialized in __init__)
+    BACKEND_STATUS_URL: str = ""
+    REPORT_CREATE_URL: str = ""
+    REPORT_STATUS_UPDATE_URL: str = ""
+    CHAT_STATUS_UPDATE_URL: str = ""
+    SUMMARY_CREATE_URL: str = ""
+    SUMMARY_STATUS_UPDATE_URL: str = ""
 
+    # Cloudflare R2 / S3 Configuration
+    R2_ACCESS_KEY_ID: str = ""
+    R2_SECRET_ACCESS_KEY: str = ""
+    R2_BUCKET_NAME: str = "drhp-files"
+    CLOUDFLARE_URI: str = "https://0656c3a93c4bf3f9004bdca37344b55d.r2.cloudflarestorage.com"
+    S3_REGION: str = "auto"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        # Ensure NODE_BACKEND_URL doesn't have a trailing slash
+        if self.NODE_BACKEND_URL.endswith("/"):
+            self.NODE_BACKEND_URL = self.NODE_BACKEND_URL[:-1]
+            
+        # Initialize callback URLs
+        self.BACKEND_STATUS_URL = f"{self.NODE_BACKEND_URL}/api/documents/upload-status/update"
+        self.REPORT_CREATE_URL = f"{self.NODE_BACKEND_URL}/api/reports/create-report"
+        self.REPORT_STATUS_UPDATE_URL = f"{self.NODE_BACKEND_URL}/api/reports/report-status/update"
+        self.CHAT_STATUS_UPDATE_URL = f"{self.NODE_BACKEND_URL}/api/chats/chat-status/update"
+        self.SUMMARY_CREATE_URL = f"{self.NODE_BACKEND_URL}/api/summaries/create"
+        self.SUMMARY_STATUS_UPDATE_URL = f"{self.NODE_BACKEND_URL}/api/summaries/summary-status/update"
+
         # Auto-configure Redis URLs if not set
         if not self.CELERY_BROKER_URL:
             redis_password = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""

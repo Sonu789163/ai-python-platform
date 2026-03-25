@@ -115,10 +115,9 @@ class ChatService:
         """
         start_time = time.time()
         
-        # Decide index based on document type
         # Use consolidated index for both types
-        index_name = settings.PINECONE_DRHP_INDEX
-        host = settings.PINECONE_DRHP_HOST
+        index_name = settings.PINECONE_INDEX
+        host = settings.PINECONE_INDEX_HOST
 
         logger.info("Chat query received", message=message, doc_type=document_type, namespace=namespace)
 

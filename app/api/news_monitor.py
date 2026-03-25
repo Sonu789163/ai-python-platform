@@ -1,11 +1,11 @@
-
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel
 from typing import List, Optional
 from app.services.news_monitor import run_monitor
+from app.middleware.internal_auth import require_internal_secret
 import logging
 
-router = APIRouter(prefix="/news-monitor", tags=["News Monitor"])
+router = APIRouter(prefix="/news-monitor", tags=["News Monitor"], dependencies=[Depends(require_internal_secret)])
 logger = logging.getLogger(__name__)
 
 class InstantCrawlRequest(BaseModel):

@@ -26,148 +26,35 @@ def process_document(
     metadata: Dict[str, Any] = None
 ) -> Dict[str, Any]:
     """
-    Process document through the Data Ingestion Pipeline (Matched to n8n workflow).
+    Asynchronous Document Ingestion Task.
+    Uses IngestionPipeline service for high-fidelity extraction (Tables + TOC).
     """
-    start_time = time.time()
-    metadata = metadata or {}
-    doc_type = metadata.get("doc_type", "drhp").lower()  # drhp or rhp
-    filename = metadata.get("filename", "document.pdf")
+    from app.services.ingestion_pipeline import ingestion_pipeline
+    import asyncio
     
-    bound_logger = log_job_start(logger, job_id, "data_ingestion", file_type=file_type, doc_type=doc_type)
+    logger.info("Celery: Starting document ingestion task", job_id=job_id)
     
     try:
-        # Determine Pinecone Index (Consolidated)
-        index_name = settings.PINECONE_DRHP_INDEX
-            
-        # Stage 1: Retrieve document (In prod, you would download from S3/Vercel Blob)
-        bound_logger.info("Retrieving document", file_url=file_url)
-        import requests
-        resp = requests.get(file_url, timeout=30)
-        resp.raise_for_status()
-        file_content = resp.content
-        bound_logger.info(f"Document downloaded. Size: {len(file_content)} bytes")
-        
-        # Stage 2: Extract and Clean Text (Matched to n8n "Cleaned text1" logic)
-        bound_logger.info("Extracting and cleaning text")
-        extraction_result = extraction_service.extract_text(file_content, file_type)
-        text = extraction_result["text"]
-        
-        if not text or len(text) < 100:
-             bound_logger.error("Text extraction failed or returned very little text", text_len=len(text) if text else 0)
-             raise Exception("Text extraction yielded insufficient content")
-             
-        bound_logger.info(f"Text extracted. Length: {len(text)} characters")
-
-        
-        # Stage 3: Chunk text (Matched to n8n "Recursive Character Text Splitter" 4000/800)
-        bound_logger.info("Splitting text into chunks")
-        
-        # Debug: Check specifically for "SECTION III" content in raw text
-        if "SECTION III" in text or "BUSINESS OVERVIEW" in text:
-             bound_logger.info("SECTION III / BUSINESS OVERVIEW header found in raw extracted text")
-        else:
-             bound_logger.warning("SECTION III / BUSINESS OVERVIEW header NOT found in extracted text")
-
-        chunk_metadata = {
-            "source": file_url,
-            "job_id": job_id,
-            "documentName": filename,
-            "documentId": metadata.get("documentId", ""),
-            "domain": metadata.get("domain", ""),
-            "domainId": metadata.get("domainId", ""),
-            "type": doc_type.upper() if doc_type else "DRHP"
-        }
-        
-        chunks = chunking_service.chunk_with_metadata(
-            text,
-            metadata=chunk_metadata
-        )
-        bound_logger.info(f"Generated {len(chunks)} chunks")
-        
-        # Monitor chunk content sample
-        if len(chunks) > 0:
-             bound_logger.info(f"Sample Chunk 0 Length: {len(chunks[0]['chunk_text'])}")
-
-        
-        # Stage 4: Generate Embeddings (Matched to n8n "text-embedding-3-large")
-        bound_logger.info("Generating OpenAI embeddings", count=len(chunks))
-        # Embedding service call (sync wrapper around LangChain)
-        chunks_with_embeddings = asyncio.run(embedding_service.embed_chunks(chunks))
-        
-        if len(chunks_with_embeddings) > 0:
-             emb_len = len(chunks_with_embeddings[0].get("values", []))
-             bound_logger.info(f"Embedding generated. Dimension: {emb_len}")
-        
-        # Stage 5: Upsert to Pinecone
-        bound_logger.info("Upserting to Pinecone", index=index_name)
-        upsert_res = vector_store_service.upsert_chunks(
-            chunks=chunks_with_embeddings,
-            index_name=index_name,
-            namespace=filename,
-            host=settings.PINECONE_DRHP_HOST
-        )
-        bound_logger.info(f"Upsert Response: {upsert_res}")
-        
-        # Stage 6: Store processing record in MongoDB
-        if not mongodb.sync_db:
-            mongodb.connect_sync()
-        collection = mongodb.get_sync_collection("document_processing")
-        
-        collection.insert_one({
-            "job_id": job_id,
-            "filename": filename,
-            "doc_type": doc_type,
-            "index_name": index_name,
-            "char_count": len(text),
-            "chunk_count": len(chunks),
-            "status": "completed",
-            "created_at": time.time()
-        })
-        
-        # Stage 7: Notify Backend (Matched to n8n "Respond to Webhook9")
-        backend_notifier.notify_status(
+        # Run the async pipeline service in the sync Celery worker
+        result = asyncio.run(ingestion_pipeline.process(
+            file_url=file_url,
+            file_type=file_type,
             job_id=job_id,
-            status="completed",
-            namespace=filename
-        )
+            metadata=metadata
+        ))
         
-        execution_time = time.time() - start_time
-        log_job_complete(bound_logger, job_id, execution_time, status="success")
-        
-        return {
-            "success": True,
-            "status": "completed",
-            "namespace": filename,
-            "message": "Document processed and stored successfully"
-        }
+        logger.info("Celery: Document ingestion task successful", job_id=job_id)
+        return result
     
     except Exception as e:
-        execution_time = time.time() - start_time
-        error_msg = str(e)
-        error_stack = traceback.format_exc()
-        
-        log_job_error(bound_logger, job_id, e, execution_time)
-        
-        # Notify Backend of Failure (Matched to n8n "Send Error to Backend3")
+        logger.error("Celery: Document ingestion task FAILED", job_id=job_id, error=str(e))
+        # Ensure backend is notified of failure if not already handled in service
         backend_notifier.notify_status(
             job_id=job_id,
             status="failed",
-            namespace=filename,
-            error={
-                "message": error_msg,
-                "stack": error_stack
-            }
+            namespace=metadata.get("filename", "document.pdf") if metadata else "document.pdf",
+            error={"message": str(e), "stack": traceback.format_exc()}
         )
-        
-        # Store error in MongoDB
-        if not mongodb.sync_db:
-            mongodb.connect_sync()
-        collection = mongodb.get_sync_collection("document_processing")
-        collection.update_one(
-            {"job_id": job_id},
-            {"$set": {"status": "failed", "error": error_msg, "error_stack": error_stack}}
-        )
-        
         raise
 
 
@@ -240,8 +127,8 @@ def generate_summary(
         fund_config = await fund_service.get_fund_config(domain_id) if domain_id else {}
         
         # Select correct index based on doc_type (Single Index Strategy)
-        index_name = settings.PINECONE_DRHP_INDEX
-        host = settings.PINECONE_DRHP_HOST
+        index_name = settings.PINECONE_INDEX
+        host = settings.PINECONE_INDEX_HOST
         
         # Run the async pipeline with fund config
         return await summary_pipeline.generate_summary(
@@ -263,14 +150,19 @@ def generate_summary(
             # Use markdown if html is not provided (pipeline returns markdown)
             content = result.get("html") or result.get("markdown", "")
             
-            backend_notifier.create_summary(
+            created = backend_notifier.create_summary(
                 title=f"Summary: {namespace}",
                 content=content,
                 document_id=metadata.get("documentId", ""),
                 domain=metadata.get("domain", ""),
                 domain_id=metadata.get("domainId", ""),
+                workspace_id=metadata.get("workspaceId", ""),
                 authorization=metadata.get("authorization", "")
             )
+            if not created:
+                logger.error("Failed to create summary in backend, check backend logs", namespace=namespace)
+            else:
+                logger.info("Summary created successfully in backend", namespace=namespace)
         
         # Then update the status to trigger UI refresh
         pipeline_status = result.get("status", "error")
@@ -381,6 +273,7 @@ def generate_comparison(
                 rhp_id=rhp_id,
                 domain=domain,
                 domain_id=domain_id,
+                workspace_id=metadata.get("workspaceId", ""),
                 authorization=authorization
             )
             

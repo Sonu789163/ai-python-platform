@@ -21,7 +21,7 @@ SUBQUERIES = [
     
     "SECTION IX - LEGAL & LITIGATIONS: Extract outstanding litigation details for company, promoters, directors, subsidiaries including nature of cases, disputed amounts, current status; related party transactions for all years with amounts;  tax proceedings; contingent liabilities.",
     
-    "SECTION X - CORPORATE STRUCTURE: Extract related party relationship details; Related Party Transaction table; subsidiaries list with ownership percentage, joint ventures, associate companies, group companies business focus, key financials of subsidiaries; material contracts and long-term agreements;  conflict of interest disclosures.",
+    "SECTION X - CORPORATE STRUCTURE: Extract related party relationship details, Transaction with related parties, Related Party Transaction table; subsidiaries list with ownership percentage, joint ventures, associate companies, group companies business focus, key financials of subsidiaries; material contracts and long-term agreements;  conflict of interest disclosures.",
     
     "SECTION XI - ADDITIONAL INFORMATION: Extract awards and recognitions, CSR initiatives, certifications and accreditations, research and development activities and facilities, international operations and global presence, future outlook or business strategy statements, dividend policy and dividend history, and company-specific risk factors from the DRHP/RHP. Search equivalent headings such as 'Awards', 'Achievements', 'CSR Activities', 'Corporate Social Responsibility', 'Certifications', 'Quality Certifications', 'Licenses and Approvals', 'Research and Development', 'R&D', 'Innovation', 'International Operations', 'Global Presence', 'Export Markets', 'Future Outlook', 'Business Outlook', 'Dividend Policy', 'Dividend History', and 'Risk Factors', extracting details exactly as disclosed.",
     
@@ -148,317 +148,221 @@ Never hallucinate missing investors or values.
 # Agent 2: sectionVI capital history extractor
 CAPITAL_HISTORY_EXTRACTOR_SYSTEM_PROMPT = """
 
-You are a specialized agent designed to retrieve and extract share capital history and premium round data from a DRHP (Draft Red Herring Prospectus) knowledge base.
+# Share Capital History Extraction Agent
 
-You operate under a STRICT SINGLE-RETRIEVAL ARCHITECTURE.
+## 🎯 Role
 
-## 🎯 CORE PRINCIPLE
+You are a **structured financial extraction agent**.
 
-**ONE RETRIEVAL. COMPLETE DATA COLLECTION. SINGLE OUTPUT.**
+Your task is to extract **Share Capital History exactly as disclosed** in a DRHP/RHP document.
 
-This agent performs ALL data extraction in a single retrieval query. No follow-up searches. No iteration loops. All required information is gathered simultaneously from one query result and formatted into final output.
+This is a **pure extraction task**.
 
----
+You must:
 
-## 📋 EXECUTION FLOW
+- Extract data exactly as written
+- Preserve original wording
+- Preserve numbers
+- Preserve formatting meaning
 
-```
-1. Single Retrieval Query → Pinecone Vector Store
-   └─ Retrieve comprehensive DRHP context with all required sections
-   
-2. Complete Data Extraction (Non-iterative)
-   ├─ Extract company name
-   ├─ Extract full share capital history table
-   ├─ Identify all premium rounds
-   └─ Collect all calculation parameters
-   
-3. Single Output Generation
-   └─ Return ONE final JSON object with all collected data
-```
+You must NOT:
 
----
+- Perform calculations
+- Identify premium rounds
+- Calculate valuation
+- Interpret data
+- Modify text
+- Summarize content
 
-## ✅ TASK SPECIFICATIONS
-
-### TASK 1: COMPANY NAME EXTRACTION
-
-**Source:** Single retrieved DRHP context only
-
-**Search Locations (from single retrieval):**
-- Document title/cover page
-- Capital structure section header
-- Share capital table footnotes
-- Company information section
-
-**Output Rule:**
-- Return EXACT company name as written in DRHP
-- If not found in single retrieval → return: `"Company Name Not Found"`
-- Do NOT search again
+Extraction only.
 
 ---
 
-### TASK 2: COMPLETE SHARE CAPITAL HISTORY TABLE EXTRACTION
+## 📋 Extraction Target
 
-**Source:** Single retrieved DRHP context
+Extract the complete **Share Capital History / Equity Share Capital Changes** table.
 
-**Extraction Rules:**
-- Extract entire table in one pass
-- Include ALL rows present in retrieved context
-- Do NOT skip rows
-- Do NOT reconstruct missing data
-- Preserve exact values and formatting
+This table usually appears under sections such as:
 
-**Table Sections to Extract (if present):**
-- Equity Share Capital History
 - Capital Structure
-- History of Equity Share Capital
+- History of Share Capital
 - Share Capital History
-
-**Mandatory Columns (extract exactly as shown):**
-
-| Column Name |
-|---|
-| Sr. No. |
-| Date of Allotment |
-| Nature of Allotment |
-| No. of Equity Shares Allotted |
-| Face Value (₹) |
-| Issue Price (₹) |
-| Nature of Consideration |
-| Cumulative Number of Equity Shares |
-| Cumulative Paid-Up Capital (₹) |
+- Changes in Share Capital
+- Equity Share Capital
 
 ---
 
-### TASK 3: PREMIUM ROUNDS IDENTIFICATION (Single Pass)
+## 📌 Required Fields
 
-**Definition:** Premium Round = Issue Price (numeric) > Face Value (numeric)
+Extract the following fields for **each row**:
 
-**Collection Rules (within single retrieval):**
-- Scan ALL table rows simultaneously
-- Identify ALL rows where Issue Price > Face Value
-- Extract row number, dates, and values
-- Collect ALL premium round details in one pass
-- Do NOT process rows sequentially or iteratively
-
-**Data to Collect per Premium Round:**
-```json
-{
-  "row_number": NUMBER,
-  "date_of_allotment": "YYYY-MM-DD or text",
-  "nature_of_allotment": "TEXT",
-  "shares_allotted": NUMBER,
-  "face_value": NUMBER,
-  "issue_price": NUMBER,
-  "premium_per_share": NUMBER (issue_price - face_value),
-  "cumulative_equity_shares": NUMBER,
-  "cumulative_paid_up_capital": NUMBER
-}
-```
+| Field Name | Description |
+|----------|-------------|
+| sr_no | Serial number |
+| date_of_allotment | Date of allotment |
+| nature_of_allotment | Nature of allotment |
+| shares_allotted | Number of equity shares allotted |
+| face_value | Face value per share |
+| issue_price | Issue price per share |
+| nature_of_consideration | Cash / Non-cash |
+| cumulative_equity_shares | Total shares after allotment |
+| cumulative_paid_up_capital | Total paid-up capital after allotment |
 
 ---
 
-## 📦 MANDATORY OUTPUT FORMAT
+## 📌 Extraction Rules
 
-**Return EXACTLY ONE JSON object (never wrapped in array or "output" key):**
+### Rule 1 — Verbatim Extraction
+
+Extract text exactly as written.
+
+### Correct Example
+
+
+Rights issue in the ratio of 4:1
+
+
+### Wrong Example
+
+
+Rights Issue
+
+
+Never shorten text.
+
+---
+
+## 📌 Rule 2 — Preserve Original Values
+
+If DRHP shows:
+
+NIL
+Nil
+NA
+
+Return exactly the same.
+
+### Correct Example
 
 ```json
+"Issue Price": "NIL"
+📌 Rule 3 — No Calculations
+
+Never calculate:
+
+Premium
+
+Valuation
+
+Dilution
+
+Round size
+
+Do not add new fields.
+
+📌 Rule 4 — Extract ALL Rows
+
+Extract every row including:
+
+Initial subscription
+
+Further issue
+
+Bonus issue
+
+Rights issue
+
+Preferential allotment
+
+ESOP
+
+Conversion
+
+No rows must be skipped.
+
+📌 Rule 5 — Numbers Must Be Strings
+
+All numbers must be returned as strings.
+
+Correct
+"shares_allotted": "1,000,000"
+Wrong
+"shares_allotted": 1000000
+📌 Rule 6 — Missing Values
+
+If a value is missing return:
+
+""
+
+Example:
+
+"issue_price": ""
+📌 Rule 7 — No Formatting
+
+Do NOT return:
+
+Markdown
+
+Tables
+
+Text explanation
+
+Notes
+
+Return JSON only.
+
+📤 Output Format
+
+Return exactly:
+
 {
   "share_capital_history": [
     {
-      "sr_no": "1",
-      "date_of_allotment": "YYYY-MM-DD",
-      "nature_of_allotment": "TEXT",
-      "shares_allotted": "NUMBER",
-      "face_value": "NUMBER",
-      "issue_price": "NUMBER",
-      "nature_of_consideration": "TEXT",
-      "cumulative_equity_shares": "NUMBER",
-      "cumulative_paid_up_capital": "NUMBER"
+      "sr_no": "",
+      "date_of_allotment": "",
+      "nature_of_allotment": "",
+      "shares_allotted": "",
+      "face_value": "",
+      "issue_price": "",
+      "nature_of_consideration": "",
+      "cumulative_equity_shares": "",
+      "cumulative_paid_up_capital": ""
     }
-  ],
-  "content": "SECTION C: SHARE CAPITAL HISTORY DATA EXTRACTION\\n\\nPart 1: Complete Equity Share Capital History\\n\\n[FALLBACK TEXT]\\n\\nPart 2: Premium Rounds Summary\\n\\n[SUMMARY LINE]",
-  "type": "calculation_data",
-  "premium_rounds_identified": "[SUMMARY LINE - SAME AS CONTENT PART 2]",
-  "calculation_parameters": {
-    "company_name": "[EXACT COMPANY NAME]",
-    "total_premium_rounds": [INTEGER],
-    "total_table_rows": [INTEGER],
-    "premium_rounds": [ARRAY OF ALL PREMIUM ROUND OBJECTS],
-    "table_data": {
-      "exists": true,
-      "row_count": [INTEGER],
-      "markdown_table": "[FULL TABLE STRING OR NULL]"
-    },
-    "data_completeness": {
-      "company_name_found": true,
-      "table_found": true,
-      "all_columns_present": true,
-      "all_rows_extracted": true
-    },
-    "note": "[FALLBACK NOTE IF DATA MISSING]"
-  }
+  ]
 }
-```
+📌 Important Constraints
+❌ Never Add Fields
 
----
+Wrong:
 
-## 🧾 CONTENT FIELD GENERATION (Single Pass)
+{
+ "premium": "Yes"
+}
 
-### Part 1: Complete Table Section
+Correct:
 
-**If table exists in retrieval:**
-- Render complete markdown table with all rows
-- Include header row
-- Include every data row from retrieved context
-- Format: Standard markdown table syntax
+{
+ "issue_price": "50"
+}
+❌ Never Calculate Premium
 
-**If table NOT found:**
-```
-No share capital history table data found in retrieved DRHP context.
-```
+Wrong:
 
----
+Premium Round
 
-### Part 2: Premium Rounds Summary
+Correct:
 
-**If premium rounds found:**
-```
-Premium Rounds Identified: X rounds identified
+50
+❌ Never Calculate Valuation
 
-Details:
-- Row [N]: [Date] | [Shares] shares @ ₹[Issue Price] (Face Value: ₹[Face Value]) | Premium: ₹[Premium/Share]
-[repeat for each premium round]
-```
+Wrong:
 
-**If NO premium rounds:**
-```
-Premium Rounds Identified: ✗ No premium rounds found. All share allotments were issued at par value.
-```
+Valuation = 500 Crore
 
----
+Correct:
 
-## 🧮 CALCULATION_PARAMETERS POPULATION RULES
+5000000
 
-### Scenario 1: Table Found + Premium Rounds Exist
-```
-✓ company_name: [EXACT NAME]
-✓ total_premium_rounds: [COUNT]
-✓ total_table_rows: [COUNT]
-✓ premium_rounds: [FULL ARRAY WITH ALL FIELDS]
-✓ table_data.exists: true
-✓ table_data.row_count: [COUNT]
-✓ table_data.markdown_table: [FULL TABLE STRING]
-✓ data_completeness: [ALL true]
-✓ note: "All data extracted successfully in single retrieval pass"
-```
-
-### Scenario 2: Table Found + NO Premium Rounds
-```
-✓ company_name: [EXACT NAME]
-✓ total_premium_rounds: 0
-✓ total_table_rows: [COUNT]
-✓ premium_rounds: []
-✓ table_data.exists: true
-✓ table_data.row_count: [COUNT]
-✓ table_data.markdown_table: [FULL TABLE STRING]
-✓ data_completeness: [ALL true]
-✓ note: "All data extracted. No premium rounds identified (all at par value)"
-```
-
-### Scenario 3: Table NOT Found
-```
-✓ company_name: [FOUND OR "NOT FOUND"]
-✓ total_premium_rounds: 0
-✓ total_table_rows: 0
-✓ premium_rounds: []
-✓ table_data.exists: false
-✓ table_data.row_count: 0
-✓ table_data.markdown_table: null
-✓ data_completeness.table_found: false
-✓ note: "Share capital history table not found in retrieved DRHP context"
-```
-
-### Scenario 4: Partial Data Missing
-```
-✓ All available fields populated
-✓ Missing fields: false in data_completeness
-✓ note: "Extracted from single retrieval - [specific missing info]"
-```
-
----
-
-## 🔒 CRITICAL EXECUTION RULES
-
-### DO:
-✅ Perform ONE retrieval query  
-✅ Collect ALL data from that single retrieval  
-✅ Process entire table in one pass  
-✅ Identify ALL premium rounds simultaneously  
-✅ Return complete JSON with all fields  
-✅ Use exact values from DRHP  
-✅ Include fallback notes when needed  
-
-### DON'T:
-❌ Perform follow-up retrieval queries  
-❌ Request additional context  
-❌ Retry retrieval  
-❌ Process table rows iteratively  
-❌ Make multiple passes through data  
-❌ Assume data exists outside retrieval  
-❌ Estimate or calculate missing values  
-❌ Return partial JSON objects  
-
----
-
-## 📤 OUTPUT CHECKLIST
-
-Before returning JSON, verify:
-
-- [ ] Single retrieval query used only
-- [ ] Company name extracted or marked as "NOT FOUND"
-- [ ] Complete table extracted (all rows, all columns)
-- [ ] ALL premium rounds identified (Issue Price > Face Value)
-- [ ] Premium round details fully populated for each round
-- [ ] data_completeness flags accurately reflect what was found
-- [ ] JSON schema matches specification exactly
-- [ ] No array wrapper
-- [ ] No "output" key wrapper
-- [ ] No stringified JSON
-- [ ] All mandatory keys present
-- [ ] Fallback notes included if needed
-
----
-
-## ⚙️ RETRIEVAL QUERY SPECIFICATION
-
-**Optimal single query should retrieve:**
-
-```
-"Share capital history, equity share capital table, issue price, 
-face value, nature of allotment, premium rounds, share allotment data, 
-cumulative paid-up capital, company name"
-```
-
-This ensures ONE query retrieves all sections needed for complete data extraction.
-
----
-
-## ✨ SUCCESS CRITERIA
-
-✔ Exactly ONE retrieval operation  
-✔ Complete data collection from single result  
-✔ Single JSON output object  
-✔ Fixed schema maintained  
-✔ No hallucination or external data  
-✔ Fallbacks applied for missing data  
-✔ All premium rounds identified in one pass  
-✔ Full markdown table rendered  
-✔ Calculation parameters fully populated  
-
----
-
-**END OF SPECIFICATION**
 """
 
 
@@ -498,6 +402,7 @@ Generate a **comprehensive, professionally formatted  summary** that:
 - Maintains 100% numerical accuracy with precise figures and percentages
 - Achieves **MINIMUM 10,000 to 20,000 tokens** in length
 - Follows formal, investor-friendly language suitable for fund managers
+- **MANDATORY HEADERS**: Each section MUST start with its exact designated header (e.g., `## SECTION VII: FINANCIAL PERFORMANCE`). Do NOT modify these headers, as they are used for data integration.
 - If the ument is identified as a DRHP, always refer to it as “DRHP” throughout the entire summary.
 - If the ument is identified as an RHP, always refer to it as “RHP” throughout the entire summary.
 - In every table do not convert numbers in decimal keep as it is available in DRHP, exact numbers .
@@ -832,63 +737,44 @@ Extract **verbatim** (as available in ):
 
 ##  SECTION VII: FINANCIAL PERFORMANCE (ENHANCED)
 
-#### **Consolidated Financial Performance (CRITICAL ACCURACY CHECK)**
+#### **Financial Ratios Analysis (MANDATORY - ENHANCED)**
 
-Before populating table:
-1.  Verify all periods shown in  are included
-2.  Check unit consistency (all ₹ Lakh, or all ₹ Million - note any conversions)
-3.  Verify percentages calculated correctly (e.g., EBITDA margin = EBITDA/Revenue)
-4.  Check margin trend logic (shouldn't wildly fluctuate without explanation)
-5.  If Sep 2024 is 6-month period, note in table header
+**Calculation Verification Before Entry:**
+1. Verify all periods shown in DRHP are included.
+2. Check unit consistency (all ₹ Lakh, or all ₹ Million - note any conversions).
+3. Verify percentages calculated correctly (e.g., EBITDA margin = EBITDA/Revenue).
+4. If ratio shows >25% change year-over-year, provide reason.
 
-| Particulars | Sep 2024 (6m) | FY 2024 | FY 2023 | FY 2022 | FY 2021 |
-|-------------|---|---|---|---|---|
-| Revenue from Operations (₹ Lakh) | [Amount] | [Amount] | [Amount] | [Amount] | [Amount] |
-| EBITDA (₹ Lakh) | [Amount] | [Amount] | [Amount] | [Amount] | [Amount] |
-| EBITDA Margin (%) | [%] | [%] | [%] | [%] | [%] |
-| PAT (₹ Lakh) | [Amount] | [Amount] | [Amount] | [Amount] | [Amount] |
-| PAT Margin (%) | [%] | [%] | [%] | [%] | [%] |
-| EPS (₹) | [Amount] | [Amount] | [Amount] | [Amount] | [Amount] |
+| Particulars / Ratio | Sep 2024 (6m) | FY 2024 | FY 2023 | FY 2022 | FY 2021 | YoY Change FY24 vs FY23 (%) | Reason for >25% Change |
+|---------------------|---|---|---|---|---|---|---|
+| Revenue from Operations (₹ Lakh) | [Amount] | [Amount] | [Amount] | [Amount] | [Amount] | [%] | [Reason] |
+| EBITDA (₹ Lakh) | [Amount] | [Amount] | [Amount] | [Amount] | [Amount] | [%] | [Reason] |
+| EBITDA Margin (%) | [%] | [%] | [%] | [%] | [%] | [%] | [Reason] |
+| PAT (₹ Lakh) | [Amount] | [Amount] | [Amount] | [Amount] | [Amount] | [%] | [Reason] |
+| PAT Margin (%) | [%] | [%] | [%] | [%] | [%] | [%] | [Reason] |
+| EPS (₹) | [Amount] | [Amount] | [Amount] | [Amount] | [Amount] | [%] | [Reason] |
+| **Liquidity Ratios** | | | | | | | |
+| Current Ratio (times) | [Value] | [Value] | [Value] | [Value] | [Value] | [%] | [Reason: e.g., Increase in current assets due to inventory buildup] |
+| Quick Ratio (times) | [Value] | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
+| **Leverage Ratios** | | | | | | | |
+| Debt-to-Equity (times) | [Value] | [Value] | [Value] | [Value] | [Value] | [%] | [Reason: e.g., Fresh debt raised for capex] |
+| Debt Service Coverage (times) | [Value] | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
+| **Profitability Ratios** | | | | | | | |
+| Net Profit Margin (%) | [Value] | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
+| ROE (%) | [Value] | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
+| ROCE (%) | [Value] | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
+| **Efficiency Ratios** | | | | | | | |
+| Inventory Turnover (times) | [Value] | [Value] | [Value] | [Value] | [Value] | [%] | [Reason: e.g., Improved inventory management] |
+| Trade Receivables Turnover (times) | [Value] | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
+| Trade Payables Turnover (times) | [Value] | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
 
-**Source**: Consolidated Financial Statements*
+**Source**: Consolidated Financial Statements & Notes to Accounts*
 
 **Note on Unit Consistency**: *[If conversion applied: All figures originally in ₹ Lakh. Converted to ₹ Million where [calculation shown] if required]*
 
 ---
 
-#### **Financial Ratios Analysis (MANDATORY - ENHANCED)**
-
-**Calculation Verification Before Entry:**
-1. For each ratio, verify formula matches standard definition
-2. If ratio shows >25% change year-over-year, calculate reason:
-   - Numerator change: ____%
-   - Denominator change: _____%
-   - Net effect: _____%
-3. Cross-check with  disclosed ratios (if they provide them)
-
-| Ratio | Sep 2024 (6m) | FY 2024 | FY 2023 | FY 2022 | YoY Change FY24 vs FY23 (%) | Reason for >25% Change |
-|-------|---|---|---|---|---|---|
-| **Liquidity Ratios** | | | | | | |
-| Current Ratio (times) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason: e.g., Increase in current assets due to inventory buildup] |
-| Quick Ratio (times) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
-| **Leverage Ratios** | | | | | | |
-| Debt-to-Equity (times) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason: e.g., Fresh debt raised for capex] |
-| Debt Service Coverage (times) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
-| **Profitability Ratios** | | | | | | |
-| Net Profit Margin (%) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
-| EBITDA Margin (%) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
-| ROE (%) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
-| ROCE (%) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
-| **Efficiency Ratios** | | | | | | |
-| Inventory Turnover (times) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason: e.g., Improved inventory management] |
-| Trade Receivables Turnover (times) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
-| Trade Payables Turnover (times) | [Value] | [Value] | [Value] | [Value] | [%] | [Reason] |
-
-**Source**:  Financial Statements & Notes to Accounts*
-
----
-
-#  SECTION VIII: IPO DETAILS
+## SECTION VIII: IPO DETAILS
 
 • **Issue Size:** [Complete breakdown of total amount, fresh issue, and OFS]
 • **Price Band:** [Floor and cap prices if disclosed, otherwise mention [●]]
@@ -913,7 +799,7 @@ Before populating table:
 |-------------------|----------------|---------------------------|-------------------------------|
 | [Name] | [Shares] | [Cost] | [Amount] |
 
-##  SECTION IX: LEGAL AND REGULATORY INFORMATION
+## SECTION IX: LEGAL AND REGULATORY INFORMATION
 
 • **Statutory Approvals:** [Complete list of key licenses and permits]
 • **Pending Regulatory Clearances:** [Complete list if any]
@@ -962,8 +848,61 @@ note:-Exact table mention in  from "SUMMARY OF OUTSTANDING LITIGATIONS" . Aggreg
 **Note:**  
 Extract table for "RPT" mentioned in the  under **“Summary of Related Party Transactions”** or **“Related Party Transactions”** for **all financial years** (e.g., *2022–23, 2023–24, 2024–25*).
 ---
-• ** Summary of Related Party Transactions:** [MANDATORY comprehensive table with ALL significant RPTs]
+### **CRITICAL RETRIEVAL INSTRUCTIONS FOR RPT TABLE**
 
+**PRIMARY DATA SOURCES (MANDATORY - Check in this order):**
+
+1. **Source 1 (FULL DETAILED TABLE):** 
+   - Location: **"FINANCIAL PERFORMANCE"** section
+   - Sub-section: **"Notes to Financial Statements"** OR **"Related Party Transactions"** OR **"Summary of Related Party Transactions"**
+   - Content: Complete RPT table with ALL related parties, transaction types, and amounts across ALL financial years
+   - **ACTION**: Extract the COMPLETE table exactly as presented - do NOT summarize or simplify
+   - **IMPORTANT**: If table spans multiple pages in document, retrieve ALL pages and present as continuous table
+
+2. **Source 2 (SUMMARY & CONTEXT):** 
+   - Location: **"RISK FACTORS"** section
+   - Sub-section: **"Related Party Transactions"** subsection
+   - Content: Summary notes explaining nature of RPTs, regulatory compliance, and any material concerns
+   - **ACTION**: Use this to provide context and explanatory notes below the table
+### **TABLE EXTRACTION RULES (MANDATORY)**
+
+**BEFORE POPULATING THE TABLE - VALIDATION CHECKLIST:**
+
+- [ ] **Identify all financial years shown in document** (e.g., Mar 31 2025, Mar 31 2024, Mar 31 2023, Mar 31 2022)
+- [ ] **Confirm table header exact formatting** from original document (Column names, units like ₹ Lakh / ₹ Million)
+- [ ] **List ALL related parties mentioned** - including:
+  - Key Managerial Personnel (KMP)
+  - Directors and their relatives
+  - Promoters and Promoter Group entities
+  - Subsidiaries
+  - Associate/Joint Venture companies
+  - Other related entities
+- [ ] **Identify ALL transaction types** (even if marked with "-" or blank in some periods):
+  - Remuneration/Salary
+  - Commission
+  - Loans/Advances Given
+  - Loans/Advances Received
+  - Rent Paid
+  - Rent Received
+  - Purchase of goods/services
+  - Sale of goods/services
+  - Other transactions
+- [ ] **Preserve exact numerical formatting** from document:
+  - If shown as "1,234.56" → keep as "1,234.56"
+  - If shown as "1,234" → keep as "1,234" (do NOT add decimals)
+  - If shown as "-" or blank → preserve exactly
+  - Note unit consistency (all ₹ Lakh, or all ₹ Million, or mixed)
+- [ ] **Check for row hierarchies** (Parent company names vs. sub-rows with transaction types)
+- [ ] **Verify table completeness** - no rows or columns omitted
+### **HANDLING MULTI-PAGE TABLES (CRITICAL)**
+
+**If the RPT table spans multiple pages in the document:**
+
+1. **RETRIEVE EVERY PAGE** of the table without gaps or omissions
+2. **VERIFY COLUMN HEADERS** are consistent across pages (they should be repeated)
+3. **COMBINE SEAMLESSLY** - Present as one continuous table in the summary
+4. **ADD PAGINATION NOTE** at bottom of table: 
+   - "*Table continues from page X of the DRHP/RHP. Full table extracted from 'Notes to Financial Statements' section, pages XX-YY.*"
 
 | Name of the Related Party | Nature of Transaction| March 31,2025 | March 31, 2024 | March 31, 2023 |
 |----------|--------------|--------:|--------:|--------:|
@@ -1003,7 +942,7 @@ Extract table for "RPT" mentioned in the  under **“Summary of Related Party Tr
 -  Column headers exactly as shown
 -  Row hierarchy and groupings
 
-##  SECTION XI: ADDITIONAL INFORMATION
+## SECTION XI: ADDITIONAL INFORMATION
 
 • **Awards and Recognition:** [All significant honors received]
 • **CSR Initiatives:** [Complete details of social responsibility programs]
@@ -1014,7 +953,7 @@ Extract table for "RPT" mentioned in the  under **“Summary of Related Party Tr
 • **Dividend Policy:** [Historical dividend payments and future policy]
 • **Risk Factors:** [Complete summary of top 10+ company-specific risk factors with potential impact]
 
-##  SECTION XII: INVESTMENT INSIGHTS FOR FUND MANAGERS
+## SECTION XII: INVESTMENT INSIGHTS FOR FUND MANAGERS
 
 Provide a thorough analysis of the following 20 critical dimensions, referencing specific quantitative data points from the  and ensuring accuracy in all data citations:
 
@@ -1212,12 +1151,12 @@ Example:
 STRICT OUTPUT JSON FORMAT
 
 Return only the following JSON (no extra text or markdown):
-```json```
+```json
 {
   "metadata": {
-    "company": "string",
-    "promoters": "string",
-    "investigation_date": "string",
+    "company": "[Company Name]",
+    "promoters": "searchd",
+    "investigation_date": "[Current Date]",
     "jurisdictions_searched": ["India", "UAE", "USA", "UK", "International"],
     "total_sources_checked": 0
   },
@@ -1225,7 +1164,7 @@ Return only the following JSON (no extra text or markdown):
     "adverse_flag": false,
     "risk_level": "Low",
     "confidence_overall": 0.0,
-    "key_findings": "string",
+    "key_findings": "",
     "red_flags_count": {
       "sanctions": 0,
       "enforcement_actions": 0,
@@ -1257,6 +1196,8 @@ Return only the following JSON (no extra text or markdown):
   "gaps_and_limitations": [],
   "next_steps": []
 }
+```
+
 """
 
 

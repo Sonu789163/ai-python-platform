@@ -126,10 +126,10 @@ class ComparisonPipeline:
         """
         Main comparison method.
         """
-        drhp_index = drhp_index or settings.PINECONE_DRHP_INDEX
-        rhp_index = rhp_index or settings.PINECONE_DRHP_INDEX # Same index now
-        drhp_host = drhp_host or settings.PINECONE_DRHP_HOST
-        rhp_host = rhp_host or settings.PINECONE_DRHP_HOST # Same host now
+        drhp_index = drhp_index or settings.PINECONE_INDEX
+        rhp_index = rhp_index or settings.PINECONE_INDEX # Same index
+        drhp_host = drhp_host or settings.PINECONE_INDEX_HOST
+        rhp_host = rhp_host or settings.PINECONE_INDEX_HOST # Same host
         start_time = time.time()
         logger.info("Starting DRHP vs RHP Comparison Pipeline", 
                     drhp=drhp_namespace, rhp=rhp_namespace)

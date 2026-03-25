@@ -37,6 +37,7 @@ celery_app.conf.update(
 # Import tasks explicitly to ensure they are registered
 import app.workers.document_pipeline
 import app.workers.news_tasks
+import app.workers.pipeline_tasks
 
 celery_app.autodiscover_tasks(['app.workers'])
 

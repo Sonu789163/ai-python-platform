@@ -1,12 +1,13 @@
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form, Depends
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 from app.services.onboarding.agent import onboard_tenant, OnboardingAgent
+from app.middleware.internal_auth import require_internal_secret
 import logging
 import json
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_internal_secret)])
 logger = logging.getLogger(__name__)
 
 

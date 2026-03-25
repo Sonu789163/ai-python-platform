@@ -54,13 +54,19 @@ class IngestionPipeline:
             return 0
 
         section_name = section.get("sectionName", "General")
+        subsection_name = section.get("subsectionName", "")
         section_range = section.get("sectionStart&End", "")
+        table_count = section.get("table_count", 0)
+        table_headings = section.get("table_headings", "")
 
-        # Build per-section metadata (matches n8n Default Data Loader3 metadataValues)
+        # Build per-section metadata (identifying section, subsection, and tables)
         chunk_metadata = {
             **base_metadata,
             "sectionName": section_name,
-            "sectionPageRange": section_range,
+            "subsectionName": subsection_name,
+            "subsectionRange": section_range,
+            "tableCount": table_count,
+            "tableHeading": table_headings
         }
 
         chunks = self.chunking.chunk_with_metadata(text, metadata=chunk_metadata)
@@ -74,7 +80,7 @@ class IngestionPipeline:
         # Embed
         chunks_with_embeddings = await self.embedding.embed_chunks(chunks)
 
-        # Build Pinecone vectors manually so we include sectionName/sectionPageRange
+        # Build Pinecone vectors with hierarchy and table context
         index = vector_store_service.get_index(index_name, host=host)
         vectors = []
         for chunk in chunks_with_embeddings:
@@ -93,7 +99,10 @@ class IngestionPipeline:
                         "domainId": meta.get("domainId", ""),
                         "type": meta.get("type", "DRHP"),
                         "sectionName": meta.get("sectionName", ""),
-                        "sectionPageRange": meta.get("sectionPageRange", ""),
+                        "subsectionName": meta.get("subsectionName", ""),
+                        "subsectionRange": meta.get("subsectionRange", ""),
+                        "tableCount": meta.get("tableCount", 0),
+                        "tableHeading": meta.get("tableHeading", "")
                     },
                 }
             )
@@ -161,19 +170,85 @@ class IngestionPipeline:
             resp.raise_for_status()
             file_content = resp.content
 
-            # 2. Extract section-wise (pdfplumber + TOC + table→Markdown)
-            sections: List[Dict[str, Any]] = (
-                self.extraction.extract_sections_from_pdf(file_content)
+            # Define early storage callback for streaming tables to Mongo
+            async def stream_tables_to_mongo(batch_tables):
+                if not batch_tables: return
+                try:
+                    if mongodb.sync_db is None:
+                        mongodb.connect_sync()
+                    result_collection = mongodb.get_sync_collection("extraction_results")
+                    for t in batch_tables:
+                        t["job_id"] = job_id
+                        t["filename"] = filename
+                        t["doc_type"] = doc_type
+                        t["created_at"] = time.time()
+                        # Update or insert immediately
+                        result_collection.update_one(
+                            {"table_id": t["table_id"]},
+                            {"$set": t},
+                            upsert=True
+                        )
+                except Exception as ex_mongo:
+                    logger.warning(f"Streaming to Mongo failed for job {job_id}: {str(ex_mongo)}")
+
+            # 2. Extract TOC First (Robust 1st check)
+            toc_map = await self.extraction.get_toc(file_content)
+            
+            # --- Store TOC Metadata for Summary Pipeline ---
+            try:
+                if mongodb.sync_db is None:
+                    mongodb.connect_sync()
+                metadata_coll = mongodb.get_sync_collection("document_metadata")
+                # Keep full TOC structure (title, pages, etc)
+                toc_data = [{"title": s.get("name"), "start_page": s.get("start_page"), "end_page": s.get("end_page"), "type": s.get("type")} for s in toc_map]
+                metadata_coll.update_one(
+                    {"filename": filename},
+                    {"$set": {
+                        "job_id": job_id,
+                        "filename": filename,
+                        "doc_type": doc_type,
+                        "toc": toc_data,
+                        "updated_at": time.time()
+                    }},
+                    upsert=True
+                )
+                logger.info("Stored TOC metadata (1st check)", filename=filename, toc_size=len(toc_data))
+            except Exception as me:
+                logger.warning("Failed to store TOC metadata", error=str(me))
+
+            # 3. Extract section-wise with real-time table streaming (using provided TOC)
+            extraction_result = await self.extraction.extract_sections_from_pdf(
+                file_content, 
+                job_id=job_id,
+                table_callback=stream_tables_to_mongo,
+                provided_toc=toc_map
             )
+            sections = extraction_result.get("sections", [])
+            tables = extraction_result.get("tables", [])
 
             if not sections:
                 logger.warning("No sections extracted from document", job_id=job_id)
+                document_id = metadata.get("documentId")
+                
+                # 1. Notify backend of failure with specific error message
+                backend_notifier.notify_status(
+                    job_id=job_id,
+                    status="failed",
+                    namespace=filename,
+                    document_id=document_id,
+                    error={"message": "No text extracted from document. Check if the PDF is non-searchable."}
+                )
+                
+                # NOTE: We no longer delete the document automatically on failure
+                # so the user can see the error message in their document list.
+                
                 return {"success": False, "error": "No text extracted from document"}
 
             logger.info(
                 "Sections extracted",
                 job_id=job_id,
                 section_count=len(sections),
+                table_count=len(tables)
             )
 
             # 3. Base metadata (everything except section-level fields)
@@ -188,8 +263,8 @@ class IngestionPipeline:
             }
 
             # 4. Pinecone index
-            index_name = settings.PINECONE_DRHP_INDEX
-            host = settings.PINECONE_DRHP_HOST
+            index_name = settings.PINECONE_INDEX
+            host = settings.PINECONE_INDEX_HOST
 
             # 5. Chunk → embed → upsert each section
             total_upserted = 0
@@ -208,7 +283,7 @@ class IngestionPipeline:
 
             # 6. MongoDB record
             try:
-                if not mongodb.sync_db:
+                if mongodb.sync_db is None:
                     mongodb.connect_sync()
                 collection = mongodb.get_sync_collection("document_processing")
                 collection.insert_one(
@@ -228,8 +303,9 @@ class IngestionPipeline:
             # 7. Notify backend
             backend_notifier.notify_status(
                 job_id=job_id,
-                status="completed",
+                status="success",  # Use "success" to trigger frontend close
                 namespace=filename,
+                document_id=metadata.get("documentId"),
             )
 
             execution_time = time.time() - start_time
@@ -251,12 +327,21 @@ class IngestionPipeline:
 
         except Exception as e:
             logger.error("Ingestion pipeline failed", error=str(e), job_id=job_id)
+            filename = metadata.get("filename", "document.pdf")
+            document_id = metadata.get("documentId")
+            
+            # 1. First notify backend of failure (while document still exists)
             backend_notifier.notify_status(
                 job_id=job_id,
                 status="failed",
                 namespace=filename,
+                document_id=document_id,
                 error={"message": str(e)},
             )
+            
+            # NOTE: We no longer delete the document automatically on failure
+            # so the user can see the error message in their document list.
+            
             raise
 
 

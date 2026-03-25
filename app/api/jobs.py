@@ -1,26 +1,41 @@
 """
 Job intake API endpoints.
 Handles job submission from Node.js backend and returns job_id immediately.
+All endpoints require X-Internal-Secret header (validated by require_internal_secret).
 """
 from typing import Dict, Any, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, Field
 import uuid
 
 from app.workers.celery_app import celery_app
 from app.core.logging import get_logger
 from app.services.ingestion_pipeline import ingestion_pipeline
+from app.middleware.internal_auth import require_internal_secret
+from app.db.mongo import mongodb
+from app.services.s3 import s3_service
+from app.services.vector_store import vector_store_service
+from app.core.config import settings
 
 logger = get_logger(__name__)
-router = APIRouter(prefix="/jobs", tags=["jobs"])
+router = APIRouter(prefix="/jobs", tags=["jobs"], dependencies=[Depends(require_internal_secret)])
 
 
 # Request/Response Models
+class PipelineJobRequest(BaseModel):
+    """New-style document processing pipeline request."""
+    job_id: str = Field(..., description="Job identifier from Node backend")
+    tenant_id: str = Field(..., description="Tenant identifier")
+    document_name: str = Field(..., description="Original name of the document")
+    s3_input_key: str = Field(..., description="Path to input PDF in S3/R2")
+    sop_config_id: Optional[str] = Field(default=None, description="Optional SOP config ID to use")
+
+
 class DocumentJobRequest(BaseModel):
-    """Document processing job request."""
-    file_url: str = Field(..., description="URL or path to document")
-    file_type: str = Field(..., description="Document type (pdf, docx, txt)")
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata")
+    """Legacy/direct document ingestion request."""
+    file_url: str
+    file_type: str = "drhp"
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class NewsJobRequest(BaseModel):
@@ -67,64 +82,137 @@ class JobStatusResponse(BaseModel):
     error: Optional[str] = None
 
 
-@router.post("/document", status_code=status.HTTP_200_OK)
+# Routes
+@router.post("/pipeline", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
+async def submit_pipeline_job(request: PipelineJobRequest) -> JobResponse:
+    """
+    New-style single-entry document processing pipeline.
+    """
+    try:
+        logger.info(
+            "New pipeline job submitted",
+            job_id=request.job_id,
+            tenant_id=request.tenant_id,
+            document=request.document_name
+        )
+        
+        celery_app.send_task(
+            "process_pipeline_job",
+            args=[request.model_dump()],
+            task_id=request.job_id
+        )
+        
+        return JobResponse(
+            job_id=request.job_id,
+            status="accepted",
+            message="Pipeline job enqueued successfully"
+        )
+    
+    except Exception as e:
+        logger.error("Failed to submit pipeline job", error=str(e), exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to enqueue pipeline job: {str(e)}"
+        )
+
+
+@router.post("/document", status_code=status.HTTP_202_ACCEPTED)
 async def submit_document_job(request: DocumentJobRequest):
     """
-    Direct Document Ingestion (Synchronous).
-    Extracts, cleans, chunks, and embeds document into Pinecone.
+    Asynchronous Document Ingestion.
+    Returns 202 Accepted immediately and offloads work to Celery.
     """
     job_id = str(uuid.uuid4())
     
     try:
-        logger.info("Processing document ingestion request", job_id=job_id, file_url=request.file_url)
+        logger.info("Enqueuing document ingestion job", job_id=job_id, file_url=request.file_url)
         
-        # Process immediately
-        result = await ingestion_pipeline.process(
-            file_url=request.file_url,
-            file_type=request.file_type,
-            job_id=job_id,
-            metadata=request.metadata
+        celery_app.send_task(
+            "process_document",
+            args=[request.file_url, request.file_type, job_id, request.metadata],
+            task_id=job_id
         )
         
         return {
             "job_id": job_id,
-            "status": "success",
-            "message": "Document processed and stored in Pinecone successfully",
-            "details": result
+            "status": "accepted",
+            "message": "Document ingestion job enqueued successfully"
         }
     
     except Exception as e:
-        logger.error("Failed document ingestion", job_id=job_id, error=str(e))
+        logger.error("Failed to enqueue document ingestion", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Ingestion failed: {str(e)}"
+            detail=f"Failed to enqueue job: {str(e)}"
         )
 
 
 @router.delete("/document", status_code=status.HTTP_200_OK)
-async def delete_document_vectors(
-    namespace: str,
+async def delete_document(
+    namespace: str,  # The filename/documentName
     doc_type: str = "drhp"
 ):
     """
-    Delete document vectors from Pinecone.
+    Comprehensive document cleanup: deletes Pinecone vectors, MongoDB results, and S3 visuals.
     """
     try:
-        from app.core.config import settings
-        from app.services.vector_store import vector_store_service
+        logger.info("Starting cascading deletion", filename=namespace)
         
-        # Determine Pinecone Index (Single Index Strategy)
-        index_name = settings.PINECONE_DRHP_INDEX
-        host = settings.PINECONE_DRHP_HOST
+        # 1. MongoDB Cleanup
+        # Identify the job_id from metadata if possible for S3 cleanup
+        job_id = None
+        try:
+            if mongodb.db is None: await mongodb.connect()
             
-        vector_store_service.delete_vectors(index_name, namespace, host=host)
-        
+            # --- Collection: document_metadata (TOC) ---
+            meta_coll = mongodb.get_collection("document_metadata")
+            doc_meta = await meta_coll.find_one({"filename": namespace})
+            if doc_meta:
+                job_id = doc_meta.get("job_id")
+                await meta_coll.delete_one({"filename": namespace})
+                logger.info("Deleted document_metadata", filename=namespace)
+
+            # --- Collection: extraction_results (Camelot tables) ---
+            results_coll = mongodb.get_collection("extraction_results")
+            res_delete = await results_coll.delete_many({"filename": namespace})
+            logger.info("Deleted extraction_results", count=res_delete.deleted_count)
+
+            # --- Collection: document_processing (Ingestion status/log) ---
+            proc_coll = mongodb.get_collection("document_processing")
+            await proc_coll.delete_many({"filename": namespace})
+            logger.info("Deleted document_processing logs")
+            
+        except Exception as mongo_err:
+            logger.warning("MongoDB cleanup encountered issues", error=str(mongo_err))
+
+        # 2. Pinecone Vector Deletion
+        try:
+            vector_store_service.delete_vectors(
+                settings.PINECONE_INDEX, 
+                namespace, 
+                host=settings.PINECONE_INDEX_HOST
+            )
+            logger.info("Deleted vectors from Pinecone", namespace=namespace)
+        except Exception as pc_err:
+            logger.warning("Pinecone vector deletion failed", error=str(pc_err))
+
+        # 3. S3/Cloudflare R2 Visuals Purge
+        if job_id:
+            try:
+                visuals_prefix = f"visuals/{job_id}/"
+                await s3_service.delete_prefix(visuals_prefix)
+                logger.info("Deleted visuals from S3", prefix=visuals_prefix)
+            except Exception as s3_err:
+                logger.warning("S3 visuals purge failed", error=str(s3_err))
+
         return {
             "status": "success",
-            "message": f"Vectors for {namespace} deleted from {index_name}"
+            "message": f"All data for {namespace} has been purged across AI systems.",
+            "job_id_used": job_id
         }
+        
     except Exception as e:
-        logger.error("Failed to delete vectors", error=str(e), namespace=namespace)
+        logger.error("Cascading deletion failed", error=str(e), filename=namespace)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -132,12 +220,6 @@ async def delete_document_vectors(
 async def submit_news_job(request: NewsJobRequest) -> JobResponse:
     """
     Submit news article processing job.
-    
-    Args:
-        request: News job request
-    
-    Returns:
-        JobResponse with job_id
     """
     try:
         job_id = str(uuid.uuid4())
@@ -180,7 +262,6 @@ async def submit_summary_job(request: SummaryJobRequest) -> JobResponse:
         task_metadata = request.metadata or {}
         
         # Ensure critical fields for BackendNotifier are present 
-        # (Node.js backend often nests these in 'metadata' object)
         final_auth = request.authorization or task_metadata.get("authorization")
         final_doc_id = request.documentId or task_metadata.get("documentId")
         final_domain_id = request.domainId or task_metadata.get("domainId")
@@ -272,12 +353,6 @@ async def submit_comparison_job(request: ComparisonJobRequest) -> JobResponse:
 async def get_job_status(job_id: str) -> JobStatusResponse:
     """
     Get job status and result.
-    
-    Args:
-        job_id: Job identifier
-    
-    Returns:
-        JobStatusResponse with current status and result
     """
     try:
         # Get task result from Celery

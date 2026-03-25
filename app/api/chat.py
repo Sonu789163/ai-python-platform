@@ -1,14 +1,16 @@
 """
 API endpoints for real-time chat.
+All endpoints require X-Internal-Secret header.
 """
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel, Field
 from app.services.chat.service import chat_service
 from app.core.logging import get_logger
+from app.middleware.internal_auth import require_internal_secret
 
 logger = get_logger(__name__)
-router = APIRouter(prefix="/chats", tags=["chats"])
+router = APIRouter(prefix="/chats", tags=["chats"], dependencies=[Depends(require_internal_secret)])
 
 import uuid
 import traceback

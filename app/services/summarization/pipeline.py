@@ -109,6 +109,72 @@ class SummaryPipeline:
 
         return markdown
         
+    async def _retrieve_tables(self, job_id: str = None, namespace: str = None, page_range: Optional[tuple] = None) -> str:
+        """
+        Retrieve structured tables from MongoDB extraction_results.
+        Supports page_range=(start, end).
+        Automatically filters out RPT tables to allow Pinecone to handle them exclusively.
+        """
+        try:
+            from app.db.mongo import mongodb
+            await mongodb.connect()
+            
+            collection = mongodb.get_collection("extraction_results")
+            query = {}
+            if job_id: query["job_id"] = job_id
+            elif namespace: query["filename"] = namespace
+                
+            if page_range:
+                query["page"] = {"$gte": page_range[0], "$lte": page_range[1]}
+
+            # EXCLUSION: Skip RPT tables so Pinecone can handle them in Section X
+            # Matches the user directive: "remove rpt extraction table from mongo functionality"
+            rpt_keywords = ["Related Party", "Transactions with Related Party", "Nature of Transaction", "RPT"]
+            query["markdown"] = {
+                "$not": {
+                    "$regex": "|".join(rpt_keywords),
+                    "$options": "i"
+                }
+            }
+
+            if not query: return ""
+                
+            cursor = collection.find(query).sort("page", 1)
+            tables = await cursor.to_list(length=200)
+            
+            if not tables: return ""
+                
+            table_md_blocks = []
+            for t in tables:
+                sec = t.get("section", "General")
+                pg = t.get("page", "?")
+                md = t.get("markdown", "")
+                
+                # Double-check: ensure it's not a generic glossary entry (small table)
+                if len(md.split("|")) < 15:
+                    continue
+                    
+                table_md_blocks.append(f"### Table from {sec} (Page {pg})\n{md}")
+                
+            return "\n\n".join(table_md_blocks)
+        except Exception as e:
+            logger.warning(f"Failed to retrieve tables: {str(e)}")
+            return ""
+
+    async def _get_toc(self, namespace: str) -> List[Dict[str, Any]]:
+        """
+        Retrieve TOC metadata from document_metadata collection.
+        """
+        try:
+            from app.db.mongo import mongodb
+            await mongodb.connect()
+            coll = mongodb.get_collection("document_metadata")
+            doc = await coll.find_one({"filename": namespace})
+            return doc.get("toc", []) if doc else []
+        except Exception as e:
+            logger.warning("Failed to get TOC metadata", error=str(e))
+            return []
+        
     async def _retrieve_context(
         self,
         queries: List[str],
@@ -116,15 +182,15 @@ class SummaryPipeline:
         index_name: str = None,
         host: str = None,
         vector_top_k: int = 12,
-        rerank_top_n: int = 10,
+        rerank_top_n: int = 12,
         metadata_filter: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Retrieves context from Pinecone with Cohere reranking.
         Matches n8n workflow retrieval logic.
         """
-        index_name = index_name or settings.PINECONE_DRHP_INDEX
-        host = host or settings.PINECONE_DRHP_HOST
+        index_name = index_name or settings.PINECONE_INDEX
+        host = host or settings.PINECONE_INDEX_HOST
         
         all_context = []
         for query in queries:
@@ -215,10 +281,16 @@ class SummaryPipeline:
             namespace,
             index_name,
             host,
-            vector_top_k=10,
-            rerank_top_n=10,
+            vector_top_k=8,
+            rerank_top_n=8,
             metadata_filter=metadata_filter
         )
+        
+        # Pull high-fidelity tables from Mongo
+        job_id = metadata_filter.get("job_id") if metadata_filter else None
+        mongo_tables = await self._retrieve_tables(job_id=job_id, namespace=namespace)
+        if mongo_tables:
+            context = f"--- STRUCTURED TABLES FROM EXTRACTION ---\n{mongo_tables}\n\n--- TEXT CONTEXT ---\n{context}"
         
         if not context:
             logger.warning("Agent 1: No context found")
@@ -276,10 +348,16 @@ class SummaryPipeline:
             namespace,
             index_name,
             host,
-            vector_top_k=15,
-            rerank_top_n=15,
+            vector_top_k=10,
+            rerank_top_n=10,
             metadata_filter=metadata_filter
         )
+        
+        # Pull high-fidelity tables from Mongo
+        job_id = metadata_filter.get("job_id") if metadata_filter else None
+        mongo_tables = await self._retrieve_tables(job_id=job_id, namespace=namespace)
+        if mongo_tables:
+            context = f"--- STRUCTURED TABLES FROM EXTRACTION ---\n{mongo_tables}\n\n--- TEXT CONTEXT ---\n{context}"
         
         if not context:
             logger.warning("Agent 2: No context found")
@@ -349,7 +427,7 @@ class SummaryPipeline:
             + "\n\n".join((custom_business_subqueries if custom_business_subqueries else BUSINESS_EXTRACTION_QUERIES))
         )
 
-        # Retrieve context for all 7 business queries (topK=12 per query, matches n8n)
+        # Retrieve context for all 16 business queries (topK=12 per query, matches n8n)
         all_context_parts = []
         seen = set()
         for i, query in enumerate((custom_business_subqueries if custom_business_subqueries else BUSINESS_EXTRACTION_QUERIES)):
@@ -363,6 +441,13 @@ class SummaryPipeline:
                     rerank_top_n=6,
                     metadata_filter=metadata_filter,
                 )
+                
+                # Pull high-fidelity tables for the business chapter
+                job_id = metadata_filter.get("job_id") if metadata_filter else None
+                mongo_tables = await self._retrieve_tables(job_id=job_id, namespace=namespace)
+                if mongo_tables and i == 0: # Only add once
+                    all_context_parts.append(f"--- HIGH-FIDELITY TABLES ---\n{mongo_tables}")
+
                 if ctx:
                     for chunk in ctx.split("\n---\n"):
                         c = chunk.strip()
@@ -394,7 +479,7 @@ class SummaryPipeline:
                     },
                 ],
                 temperature=0.0,
-                max_tokens=8192,
+                max_tokens=16384,
             )
             section3_content = response.choices[0].message.content or ""
             usage = response.usage
@@ -542,8 +627,16 @@ class SummaryPipeline:
         # ── PHASE 2: Single LLM call with ALL collected context ──
         logger.info("Agent 3 Phase 2: Generating full summary from collected context...")
         
+        # Pull high-fidelity tables from Mongo for sections III-XII
+        job_id = metadata_filter.get("job_id") if metadata_filter else None
+        mongo_tables = await self._retrieve_tables(job_id=job_id, namespace=namespace)
+        
+        table_context = ""
+        if mongo_tables:
+            table_context = f"\n\n--- HIGH-FIDELITY TABLES (PRIORITIZE THESE FOR ALL SECTIONS EXCEPT I & II) ---\n{mongo_tables}\n\n"
+
         # Combine all chunks into one context block
-        full_context = "\n\n---\n\n".join(all_chunks)
+        full_context = table_context + "\n\n--- TEXT CHUNKS ---\n\n" + "\n\n---\n\n".join(all_chunks)
         
         # Build the subqueries reference for the user message
         subqueries_list = "\n".join([f"{i+1}. {sq}" for i, sq in enumerate(active_subqueries)])
@@ -564,7 +657,7 @@ class SummaryPipeline:
                     )}
                 ],
                 temperature=0.1,
-                max_tokens=16384
+                max_tokens=24576
             )
             
             usage = response.usage
@@ -603,308 +696,188 @@ class SummaryPipeline:
     ) -> Dict[str, Any]:
         """
         Main summary generation method.
-        Orchestrates 4-agent pipeline with toggle-based conditional merging.
-        
-        Args:
-            namespace: Document namespace/fileName
-            domain_id: Tenant domain ID
-            tenant_config: Tenant configuration with toggles and custom SOP
-                {
-                    "investor_match_only": bool,
-                    "valuation_matching": bool,
-                    "adverse_finding": bool,
-                    "target_investors": List[str],
-                    "custom_summary_sop": str
-                }
-            metadata: Document metadata for filtering (documentId, documentType, etc.)
-            index_name: Pinecone index name (optional)
-            host: Pinecone host (optional)
-        
-        Returns:
-            {
-                "status": "success" | "error",
-                "markdown": str,  # Final markdown summary
-                "duration": float,
-                "usage": dict
-            }
+        Orchestrates 4-agent pipeline with conditional merging.
         """
         start_time = time.time()
         logger.info("Starting 4-Agent Summary Pipeline", namespace=namespace, domain=domain_id)
         
         # Build Metadata Filter for Tenant Isolation
         metadata_filter = {}
+        if namespace: metadata_filter["documentName"] = namespace
+        if domain_id: metadata_filter["domainId"] = domain_id
+        if metadata and "domain" in metadata: metadata_filter["domain"] = metadata["domain"]
+        if metadata and "documentId" in metadata: metadata_filter["documentId"] = metadata["documentId"]
         
-        # Strict metadata filtering based on user requirement:
-        # documentName, documentId, domain, domainId, type = documentType
-        
-        # 1. documentName (namespace)
-        if namespace:
-            metadata_filter["documentName"] = namespace
-            
-        # 2. domainId & domain
-        if domain_id:
-            metadata_filter["domainId"] = domain_id
-            # If domain name is available in metadata, add it too
-            if metadata and "domain" in metadata:
-                 metadata_filter["domain"] = metadata["domain"]
-        
-        # 3. documentId
-        if metadata and "documentId" in metadata:
-            metadata_filter["documentId"] = metadata["documentId"]
-            
-        # 4. type (documentType / doc_type)
-        # Prioritize the explicitly passed doc_type, fallback to metadata
+        # Pull high-fidelity Job ID if available
+        job_id = metadata.get("job_id") if metadata else None
+        if job_id: metadata_filter["job_id"] = job_id
+
         resolved_doc_type = doc_type or (metadata.get("documentType") if metadata else "DRHP")
-        
-        # Force Uppercase to match Pinecone metadata conventions
-        if isinstance(resolved_doc_type, str):
-            resolved_doc_type = resolved_doc_type.upper()
-        
-        # SMART INFERENCE: If doc_type is DRHP but filename contains "RHP" (not DRHP)
-        # users often name files "Something RHP.pdf" but upload them as "DRHP" (the default)
-        if resolved_doc_type == "DRHP" and namespace:
-             ns_upper = namespace.upper()
-             # If it contains RHP and DOES NOT contain DRHP, it's likely an RHP
-             if "RHP" in ns_upper and "DRHP" not in ns_upper:
-                 logger.info("Smart Inference: Corrected doc_type to RHP based on namespace", namespace=namespace)
-                 resolved_doc_type = "RHP"
-        
+        if isinstance(resolved_doc_type, str): resolved_doc_type = resolved_doc_type.upper()
         metadata_filter["type"] = resolved_doc_type
-        
-        # Sync doc_type for internal consistency in logs and prompts
         doc_type = resolved_doc_type
             
-        logger.info("Constructed metadata filter for RAG", filter=metadata_filter, doc_type=doc_type)
-            
-        # Default tenant config
-        if not tenant_config:
-            tenant_config = {}
+        if not tenant_config: tenant_config = {}
         
-        # Feature Toggles
-        investor_match_enabled = tenant_config.get("investor_match_only", False)
-        valuation_enabled = tenant_config.get("valuation_matching", False)
-        adverse_enabled = tenant_config.get("adverse_finding", False)
+        # Feature Toggles (default to True for core functionality)
+        investor_match_enabled = tenant_config.get("investor_match_only", True)
+        valuation_enabled = tenant_config.get("valuation_matching", True)
+        adverse_enabled = tenant_config.get("adverse_finding", True)
         
-        # Agent 3 (Business)
-        a3_prompt = tenant_config.get("agent3_prompt")
-        if not a3_prompt or not a3_prompt.strip():
-            logger.info("A-3: Using default BUSINESS_TABLE_EXTRACTOR_SYSTEM_PROMPT")
-            a3_prompt = BUSINESS_TABLE_EXTRACTOR_SYSTEM_PROMPT
-        else:
-            logger.info("A-3: Using custom business SOP from domain schema", preview=a3_prompt[:100])
-
-        a3_subqueries = tenant_config.get("agent3_subqueries", []) or []
-        if not a3_subqueries or not isinstance(a3_subqueries, list):
-            a3_subqueries = []
-
-        # Agent 4 (Summary)
-        a4_prompt = tenant_config.get("agent4_prompt")
-        if not a4_prompt or not a4_prompt.strip():
-            logger.info("A-4: Using default MAIN_SUMMARY_SYSTEM_PROMPT")
-            a4_prompt = MAIN_SUMMARY_SYSTEM_PROMPT
-        else:
-            logger.info("A-4: Using custom SOP from domain schema", preview=a4_prompt[:100])
-
-        a4_subqueries = tenant_config.get("agent4_subqueries", []) or []
-        if a4_subqueries and isinstance(a4_subqueries, list) and len(a4_subqueries) > 0:
-            a4_subqueries = [self._localize_prompt(sq, doc_type) for sq in a4_subqueries if isinstance(sq, str) and sq.strip()]
-        else:
-            a4_subqueries = None
-
-        # Localize prompts for the current document type (RHP vs DRHP)
-        # This ensures even custom DB prompts saying "DRHP" are corrected if the doc is an RHP
-        if doc_type == "RHP":
-            logger.info("Localizing prompts for RHP document")
-            a3_prompt = self._localize_prompt(a3_prompt, "RHP")
-            a4_prompt = self._localize_prompt(a4_prompt, "RHP")
-            if a3_subqueries:
-                a3_subqueries = [self._localize_prompt(sq, "RHP") for sq in a3_subqueries]
-            # a4_subqueries already localized above
-
-        # Agent 5 (Research)
-        a5_prompt = tenant_config.get("agent5_prompt")
-        if not a5_prompt or not a5_prompt.strip():
-            a5_prompt = None
-
         logger.info(
-            "Tenant config resolved",
+            "Feature toggles resolved",
             investor_match=investor_match_enabled,
             valuation=valuation_enabled,
             adverse=adverse_enabled,
-            has_custom_a4_sop=bool(tenant_config.get("agent4_prompt")),
-            a4_subqueries_count=len(a4_subqueries) if a4_subqueries else 0,
+            tenant_keys=list(tenant_config.keys()) if tenant_config else []
         )
         
+        # Agent 3 (Business)
+        a3_prompt = tenant_config.get("agent3_prompt") or BUSINESS_TABLE_EXTRACTOR_SYSTEM_PROMPT
+        a3_subqueries = tenant_config.get("agent3_subqueries", []) or []
+
+        # Agent 4 (Summary)
+        a4_prompt = tenant_config.get("agent4_prompt") or MAIN_SUMMARY_SYSTEM_PROMPT
+        a4_subqueries = tenant_config.get("agent4_subqueries", []) or []
+        if a4_subqueries:
+            a4_subqueries = [self._localize_prompt(sq, doc_type) for sq in a4_subqueries if isinstance(sq, str)]
+        else:
+            a4_subqueries = None
+
+        # Localize prompts for RHP
+        if doc_type == "RHP":
+            a3_prompt = self._localize_prompt(a3_prompt, "RHP")
+            a4_prompt = self._localize_prompt(a4_prompt, "RHP")
+
         try:
             # PHASE 1: Parallel Data Extraction
-            logger.info("Phase 1: Parallel Extraction (A-1 Investors, A-2 Capital, A-3 Business, A-4 Summary)")
+            logger.info("Phase 1: Parallel Extraction (A-1, A-2, A-3, A-4)")
 
             agent_1_task = self._agent_1_investor_extractor(namespace, index_name, host, metadata_filter)
             agent_2_task = self._agent_2_capital_history_extractor(namespace, index_name, host, metadata_filter)
             agent_3b_task = self._agent_3_business_table_extractor(namespace, a3_prompt, a3_subqueries, index_name, host, metadata_filter)
             agent_4_task = self._agent_3_summary_generator(namespace, doc_type, a4_prompt, a4_subqueries, index_name, host, metadata_filter)
 
-            # Run all four in parallel (matches n8n Webhook17 fan-out)
             investor_json, capital_json, section3_content, draft_summary_result = await asyncio.gather(
-                agent_1_task,
-                agent_2_task,
-                agent_3b_task,
-                agent_4_task,
-                return_exceptions=True,
+                agent_1_task, agent_2_task, agent_3b_task, agent_4_task, return_exceptions=True
             )
             
-            # Initialize usage tracking
             total_usage = {"input": 0, "output": 0}
 
-            # Handle exceptions and ensure dict types
-            if isinstance(investor_json, Exception):
-                logger.error("Agent 1 exception", error=str(investor_json))
-                investor_json = {"error": str(investor_json), "extraction_status": "failed"}
-            else:
+            # Extract output and usage
+            if isinstance(investor_json, dict):
                 u = investor_json.get("_usage", {"input": 0, "output": 0})
-                total_usage["input"] += u["input"]
-                total_usage["output"] += u["output"]
-            
-            if isinstance(capital_json, Exception):
-                logger.error("Agent 2 exception", error=str(capital_json))
-                capital_json = {"error": str(capital_json), "type": "calculation_data"}
-            else:
-                u = capital_json.get("_usage", {"input": 0, "output": 0})
-                total_usage["input"] += u["input"]
-                total_usage["output"] += u["output"]
-            
-            # Handle A-3 Business Table Extractor result
-            if isinstance(section3_content, Exception):
-                logger.error("A-3 Business Extractor exception", error=str(section3_content))
-                section3_content = ""
-            elif not isinstance(section3_content, str):
-                section3_content = ""
+                total_usage["input"] += u["input"]; total_usage["output"] += u["output"]
+            else: investor_json = {"error": str(investor_json)}
 
-            # Handle A-4 Summary Generator result
-            if isinstance(draft_summary_result, Exception):
-                logger.error("Agent 4 (Summary) exception", error=str(draft_summary_result))
-                draft_markdown = f"# Error\n\nSummary generation failed: {str(draft_summary_result)}"
-            else:
+            if isinstance(capital_json, dict):
+                u = capital_json.get("_usage", {"input": 0, "output": 0})
+                total_usage["input"] += u["input"]; total_usage["output"] += u["output"]
+            else: capital_json = {"error": str(capital_json)}
+
+            if isinstance(section3_content, Exception): section3_content = ""
+            
+            # =====================================================================
+            # FIRST: Set draft_markdown from Agent 4 (Summary Generator) result
+            # This MUST happen before any injection/modification!
+            # =====================================================================
+            if isinstance(draft_summary_result, dict):
                 draft_markdown = draft_summary_result.get("markdown", "")
                 u = draft_summary_result.get("usage", {"input": 0, "output": 0})
-                total_usage["input"] += u["input"]
-                total_usage["output"] += u["output"]
-                logger.info("=== A-4 DRAFT SUMMARY START ===")
-                print(draft_markdown)
-                logger.info("=== A-4 DRAFT SUMMARY END ===")
+                total_usage["input"] += u["input"]; total_usage["output"] += u["output"]
+            else: draft_markdown = f"# Error\n\nSummary generation failed: {str(draft_summary_result)}"
 
-            # Code in JavaScript4 equivalent: Insert Section III between SECTION II and SECTION IV
-            if section3_content:
+            # =====================================================================
+            # PHASE 2: Assembly & Merging (on the fully populated draft_markdown)
+            # =====================================================================
+            logger.info("Phase 2: Final Assembly & Merging")
+            
+            # --- Step 1: Insert Section III (Our Business) between SECTION II and SECTION IV ---
+            if section3_content and isinstance(section3_content, str) and section3_content.strip():
+                logger.info(f"Inserting Section III content ({len(section3_content)} chars)")
                 draft_markdown = self._insert_section3_into_summary(draft_markdown, section3_content)
-                logger.info("Section III inserted into draft summary")
+            else:
+                logger.warning("Section III content is empty, skipping insertion")
 
-            # draft_markdown IS the final markdown (validator removed)
-            final_markdown = draft_markdown
-            logger.info("=== A-4 FINAL SUMMARY START ===")
-            print(final_markdown)
-            logger.info("=== A-4 FINAL SUMMARY END ===")
-            
-            # PHASE 2: Markdown Conversion
-            logger.info("Phase 3: Markdown Conversion")
-            
-            # Convert Agent 1 output to markdown (if enabled)
-            investor_markdown = ""
-            if "error" not in investor_json:
-                investor_markdown = self.md_converter.convert_investor_json_to_markdown(
-                    investor_json,
-                    target_investors=tenant_config.get("target_investors", []),
+            # (Direct MongoDB table injection removed: Agent 3 & 4 now incorporate these via context)
+
+            # --- Step 3: Convert and Merge Agent 1 & 2 data into SECTION VI ---
+            investor_md = ""
+            if isinstance(investor_json, dict) and not investor_json.get("error"):
+                investor_md = self.md_converter.convert_investor_json_to_markdown(
+                    investor_json, 
+                    target_investors=tenant_config.get("target_investors"),
                     investor_match_only=investor_match_enabled,
                     doc_type=doc_type
                 )
+                logger.info(f"Agent 1: Investor markdown generated ({len(investor_md)} chars)")
+            else:
+                logger.warning(f"Agent 1: Investor data not available: {investor_json.get('error', 'unknown') if isinstance(investor_json, dict) else str(investor_json)}")
             
-            capital_markdown = ""
-            if "error" not in capital_json:
-                # User requested to remove premium rounds tables (valuation analysis)
-                capital_markdown = self.md_converter.convert_capital_json_to_markdown(
-                    capital_json,
-                    include_valuation_analysis=False
+            capital_md = ""
+            if isinstance(capital_json, dict) and not capital_json.get("error"):
+                capital_md = self.md_converter.convert_capital_json_to_markdown(
+                    capital_json, include_valuation_analysis=valuation_enabled
                 )
-            
-            # PHASE 3: Research (Deep Adverse Findings via Perplexity)
+                logger.info(f"Agent 2: Capital markdown generated ({len(capital_md)} chars)")
+            else:
+                logger.warning(f"Agent 2: Capital data not available: {capital_json.get('error', 'unknown') if isinstance(capital_json, dict) else str(capital_json)}")
+
+            # Merge Agent 1 & 2: Insert between SECTION VI and SECTION VII
+            combined_capital_investor = ""
+            if investor_md:
+                combined_capital_investor += investor_md + "\n\n"
+            if capital_md:
+                combined_capital_investor += capital_md
+
+            if combined_capital_investor.strip():
+                logger.info(f"Merging Agent 1 & 2 data ({len(combined_capital_investor)} chars) before SECTION VII")
+                draft_markdown = self.md_converter.insert_markdown_before_section(
+                    draft_markdown,
+                    combined_capital_investor,
+                    section_header="SECTION VII",
+                    section_label="Matched Investors & Capital Structure Analysis"
+                )
+            else:
+                logger.warning("Agent 1 & 2: No capital/investor data to merge")
+
+            # --- Step 4: Handle Adverse Findings Research (A-5) ---
+
             research_markdown = ""
             if adverse_enabled:
-                logger.info("Phase 4: Perplexity Research")
-                # Extract company name from investor or capital JSON
-                company_name = (
-                    investor_json.get("company_name") or 
-                    capital_json.get("calculation_parameters", {}).get("company_name") or
-                    namespace
-                )
-                # Extract promoter names to improve research accuracy
-                investors = self.md_converter._safe_get_list(investor_json, "section_a_extracted_investors")
-                promoter_names = [inv.get("investor_name") for inv in investors if inv and "promoter" in str(inv.get("investor_category", "")).lower()]
-                promoter_str = ", ".join([str(p) for p in promoter_names[:5]]) if promoter_names else ""
-
-                research_json = await research_service.research_company(
-                    company_name=company_name,
-                    promoters=promoter_str,
-                    custom_sop=a5_prompt
-                )
+                logger.info("Phase 3: Adverse Findings Research")
+                company_name = investor_json.get("company_name") or namespace
+                research_json = await research_service.research_company(company_name=company_name)
                 research_markdown = self.md_converter.convert_research_json_to_markdown(research_json)
-                
-                # Add research usage
                 u = research_json.get("_usage", {"input": 0, "output": 0})
-                total_usage["input"] += u["input"]
-                total_usage["output"] += u["output"]
-            
-            # PHASE 4: Final Assembly
-            logger.info("Phase 5: Final Assembly & Merging")
-            
-            # Combine Agent 1 (Investors) and Agent 2 (Capital/Valuation)
-            combined_capital_investor = ""
-            if investor_markdown:
-                combined_capital_investor += investor_markdown + "\n\n"
-            if capital_markdown:
-                combined_capital_investor += capital_markdown
+                total_usage["input"] += u["input"]; total_usage["output"] += u["output"]
 
-            # Step 1: Insert combined investor/capital data before SECTION VII
-            # Label changed to explicitly link with Section VI as requested
-            if combined_capital_investor:
-                final_markdown = self.md_converter.insert_markdown_before_section(
-                    final_markdown,
-                    combined_capital_investor,
-                    "SECTION VII: FINANCIAL PERFORMANCE",
-                    "Matched Investors & Share Capital History"
-                )
-
-            # Step 2: Insert research before Section XII
             if research_markdown:
-                final_markdown = self.md_converter.insert_markdown_before_section(
-                    final_markdown,
+                # Insert before XII = end of XI
+                draft_markdown = self.md_converter.insert_markdown_before_section(
+                    draft_markdown,
                     research_markdown,
-                    "SECTION XII: INVESTMENT INSIGHTS FOR FUND MANAGERS",
-                    "Adverse Findings & Research"
+                    section_header="SECTION XII",
+                    section_label="ADVERSE FINDINGS & COMPLIANCE RESEARCH"
                 )
+
+            # Final Cleanup
+            final_markdown = self._post_process_final_markdown(draft_markdown, doc_type)
             
-            # Wrap final doc with metadata (date/time)
+            # Wrap with Timestamp
             dateTime = datetime.now().strftime("%d/%m/%Y, %I:%M:%S %p")
-            header_metadata = f"---\nDate: {dateTime}\n---\n\n"
+            header_metadata = f"---\nGenerated: {dateTime}\n---\n\n"
             final_markdown = header_metadata + final_markdown
 
-            # Step 3: Final Post-Processing (Labels & Redundancy)
-            final_markdown = self._post_process_final_markdown(final_markdown, doc_type)
-
             duration = time.time() - start_time
-            logger.info("Pipeline Complete", 
-                        duration=duration, 
-                        total_input_tokens=total_usage["input"],
-                        total_output_tokens=total_usage["output"])
+            logger.info("Pipeline Complete", duration=duration)
             
             return {
                 "status": "success",
                 "markdown": final_markdown,
+                "html": final_markdown,
                 "duration": duration,
-                "usage": {
-                    "agents_executed": 4,
-                    "investor_match_enabled": investor_match_enabled,
-                    "valuation_enabled": valuation_enabled,
-                    "adverse_enabled": adverse_enabled,
-                }
+                "usage": total_usage
             }
             
         except Exception as e:

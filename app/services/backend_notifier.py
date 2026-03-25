@@ -21,7 +21,8 @@ class BackendNotifier:
         namespace: str,
         error: Optional[Dict[str, Any]] = None,
         execution_id: Optional[str] = None,
-        result: Optional[Dict[str, Any]] = None
+        result: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None
     ) -> bool:
         """
         Send status update to backend.
@@ -31,6 +32,7 @@ class BackendNotifier:
             "jobId": job_id,
             "status": status,
             "namespace": namespace,
+            "documentId": document_id,
             "execution": {
                 "workflowId": "python-platform",
                 "executionId": execution_id or job_id
@@ -73,6 +75,7 @@ class BackendNotifier:
         rhp_id: str = "",
         domain: str = "",
         domain_id: str = "",
+        workspace_id: str = "",
         authorization: str = ""
     ) -> bool:
         """
@@ -88,12 +91,15 @@ class BackendNotifier:
             "rhpNamespace": rhp_namespace,
             "rhpId": rhp_id,
             "domain": domain,
-            "domainId": domain_id
+            "domainId": domain_id,
+            "workspaceId": workspace_id
         }
         
         headers = {"Content-Type": "application/json"}
         if authorization:
             headers["Authorization"] = authorization
+        if workspace_id:
+            headers["x-workspace"] = workspace_id
             
         try:
             logger.info("Creating report in backend", title=title, session_id=session_id)
@@ -249,6 +255,7 @@ class BackendNotifier:
         document_id: str,
         domain: str = "",
         domain_id: str = "",
+        workspace_id: str = "",
         authorization: str = ""
     ) -> bool:
         """
@@ -259,12 +266,15 @@ class BackendNotifier:
             "content": content,
             "documentId": document_id,
             "domain": domain,
-            "domainId": domain_id
+            "domainId": domain_id,
+            "workspaceId": workspace_id
         }
         
         headers = {"Content-Type": "application/json"}
         if authorization:
             headers["Authorization"] = authorization
+        if workspace_id:
+            headers["x-workspace"] = workspace_id
             
         try:
             logger.info("Creating summary in backend", title=title, document_id=document_id)
@@ -279,6 +289,30 @@ class BackendNotifier:
             return True
         except Exception as e:
             logger.error("Failed to create summary", error=str(e), document_id=document_id)
+            return False
+    @staticmethod
+    def delete_document(document_id: str) -> bool:
+        """
+        Request the backend to perform a hard delete of a document.
+        Used for cleanup when ingestion fails fatally.
+        """
+        if not document_id:
+            return False
+            
+        url = f"{settings.NODE_BACKEND_URL}/api/documents/internal/{document_id}"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Secret": settings.INTERNAL_SECRET
+        }
+        
+        try:
+            logger.info("Requesting internal document deletion for cleanup", document_id=document_id)
+            response = requests.delete(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            logger.info("Internal document deletion successful", document_id=document_id)
+            return True
+        except Exception as e:
+            logger.error("Failed to request internal document deletion", error=str(e), document_id=document_id)
             return False
 
 
